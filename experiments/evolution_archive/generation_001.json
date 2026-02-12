@@ -1,0 +1,74 @@
+{
+  "generation": 1,
+  "best_code": "import numpy as np\n\ndef compute_reward(agent_name, observation, global_state, actions, world):\n    components = {}\n    \n    agent_positions = global_state['agent_positions']\n    agent_velocities = global_state['agent_velocities']\n    prey_position = global_state['prey_position']\n    distances_to_prey = global_state['distances_to_prey']\n    inter_agent_distances = global_state['inter_agent_distances']\n    is_adversary = global_state['is_adversary']\n    adversary_indices = global_state['adversary_indices']\n    prey_indices = global_state['prey_indices']\n    world_size = global_state['world_size']\n    capture_threshold = global_state['capture_threshold']\n    \n    all_agent_names = [f\"agent_{i}\" for i in range(len(agent_positions))]\n    agent_idx = all_agent_names.index(agent_name) if agent_name in all_agent_names else -1\n    \n    if is_adversary:\n        agent_idx_in_adversaries = adversary_indices.index(agent_idx)\n        dist_to_prey = distances_to_prey[agent_idx_in_adversaries]\n        \n        distance_reward = -0.2 * dist_to_prey\n        components['distance_reward'] = distance_reward\n        \n        other_adversaries = [i for i in adversary_indices if i != agent_idx]\n        formation_reward = 0.0\n        if len(other_adversaries) > 0:\n            other_positions = agent_positions[other_adversaries]\n            vectors_to_prey = other_positions - prey_position\n            angles = []\n            for vec in vectors_to_prey:\n                angle = np.arctan2(vec[1], vec[0])\n                angles.append(angle)\n            \n            min_gap = np.pi / 4\n            my_vector = agent_positions[agent_idx] - prey_position\n            my_angle = np.arctan2(my_vector[1], my_vector[0])\n            \n            gap_filled = True\n            for other_angle in angles:\n                angle_diff = abs((my_angle - other_angle + np.pi) % (2 * np.pi) - np.pi)\n                if angle_diff < min_gap:\n                    gap_filled = False\n                    break\n            \n            formation_reward = 3.0 if gap_filled else -2.0\n        components['formation_reward'] = formation_reward\n        \n        collision_penalty = 0.0\n        for other_idx in other_adversaries:\n            dist = inter_agent_distances[agent_idx, other_idx]\n            if dist < 0.25:\n                collision_penalty -= 3.0\n        components['collision_penalty'] = collision_penalty\n        \n        agent_pos = agent_positions[agent_idx]\n        boundary_penalty = 0.0\n        if (abs(agent_pos[0]) > world_size * 0.85 or \n            abs(agent_pos[1]) > world_size * 0.85):\n            boundary_penalty -= 1.5\n        components['boundary_penalty'] = boundary_penalty\n        \n        speed = np.linalg.norm(agent_velocities[agent_idx])\n        energy_penalty = -0.02 * speed\n        components['energy_penalty'] = energy_penalty\n        \n        is_prey_captured = np.any(distances_to_prey <= capture_threshold)\n        success_bonus = 15.0 if is_prey_captured else 0.0\n        components['success_bonus'] = success_bonus\n        \n    else:\n        agent_idx_in_preys = prey_indices.index(agent_idx)\n        dist_to_nearest_pur",
+  "reflection": "**奖励分量诊断**：\n- distance_reward工作正常，均值接近-1.5，引导智能体接近目标\n- collision_penalty基本失效，均值接近0，说明智能体很少碰撞或惩罚不够明显\n- formation_reward方差很小，可能权重过低或触发条件过严\n\n**任务性能分析**：\n- 成功率80.52%，达标，但Candidate 0的成功率62.09%未达标，需要进一步优化\n- 平均捕获时间40.2步，处于较低水平，表现较好\n- 主要失败模式：智能体在圈外徘徊，不敢进圈\n\n**协同行为评估**：\n- 角度标准差0.48，包围不够均匀，存在扎堆现象\n- 最小智能体距离0.3858，接近碰撞阈值，需要更强的排斥力\n- 队形质量0.2864，有改进空间\n\n**改进建议**：\n1. 增大进圈奖励的权重（当前0.8572 → 1.0），鼓励更激进的接近\n2. 降低角度排斥的权重（当前0.2558 → 0.2），避免过度排斥导致不敢进圈\n3. 添加\"全员进圈\"的额外奖励，强化协同\n4. 调整碰撞惩罚的阈值（当前0.7405 → 0.8），给予更多容错空间",
+  "best_fitness": 0.7650598559831249,
+  "all_results": [
+    {
+      "id": 0,
+      "code": "import numpy as np\n\ndef compute_reward(agent_name, observation, global_state, actions, world):\n    components = {}\n    \n    agent_positions = global_state['agent_positions']\n    agent_velocities = global_state['agent_velocities']\n    prey_position = global_state['prey_position']\n    distances_to_prey = global_state['distances_to_prey']\n    inter_agent_distances = global_state['inter_agent_distances']\n    is_adversary = global_state['is_adversary']\n    adversary_indices = global_state['adversary_indices']\n    prey_indices = global_state['prey_indices']\n    world_size = global_state['world_size']\n    capture_threshold = global_state['capture_threshold']\n    \n    all_agent_names = [f\"agent_{i}\" for i in range(len(agent_positions))]\n    agent_idx = all_agent_names.index(agent_name) if agent_name in all_agent_names else -1\n    \n    if is_adversary:\n        agent_idx_in_adversaries = adversary_indices.index(agent_idx)\n        dist_to_prey = distances_to_prey[agent_idx_in_adversaries]\n        \n        distance_reward = -0.15 * dist_to_prey\n        components['distance_reward'] = distance_reward\n        \n        other_adversaries = [i for i in adversary_indices if i != agent_idx]\n        formation_reward = 2.0\n        if len(other_adversaries) > 0:\n            other_positions = agent_positions[other_adversaries]\n            vectors_to_prey = other_positions - prey_position\n            angles = []\n            for vec in vectors_to_prey:\n                angle = np.arctan2(vec[1], vec[0])\n                angles.append(angle)\n            \n            min_gap = np.pi / 3\n            my_vector = agent_positions[agent_idx] - prey_position\n            my_angle = np.arctan2(my_vector[1], my_vector[0])\n            \n            gap_filled = True\n            for other_angle in angles:\n                angle_diff = abs((my_angle - other_angle + np.pi) % (2 * np.pi) - np.pi)\n                if angle_diff < min_gap:\n                    gap_filled = False\n                    break\n            \n            formation_reward = 2.0 if gap_filled else -1.0\n        components['formation_reward'] = formation_reward\n        \n        collision_penalty = 0.0\n        for other_idx in other_adversaries:\n            dist = inter_agent_distances[agent_idx, other_idx]\n            if dist < 0.3:\n                collision_penalty -= 2.5\n        components['collision_penalty'] = collision_penalty\n        \n        agent_pos = agent_positions[agent_idx]\n        boundary_penalty = 0.0\n        if (abs(agent_pos[0]) > world_size * 0.9 or \n            abs(agent_pos[1]) > world_size * 0.9):\n            boundary_penalty -= 1.0\n        components['boundary_penalty'] = boundary_penalty\n        \n        speed = np.linalg.norm(agent_velocities[agent_idx])\n        energy_penalty = -0.01 * speed\n        components['energy_penalty'] = energy_penalty\n        \n        is_prey_captured = np.any(distances_to_prey <= capture_threshold)\n        success_bonus = 10.0 if is_prey_captured else 0.0\n        components['success_bonus'] = success_bonus\n        \n    else:\n        agent_idx_in_preys = prey_indices.index(agent_idx)\n        dist_to_nearest_pursuer = np.min(distances_to_prey)\n        \n        distance_reward = 0.15 * dist_to_nearest_pursuer\n        components['distance_reward'] = distance_reward\n        \n        pursuer_positions = agent_positions[adversary_indices]\n        vectors_from_prey = pursuer_positions - prey_position\n        avg_direction = np.mean(vectors_from_prey, axis=0)\n        \n        desired_velocity = avg_direction * 0.1\n        dot_product = np.dot(agent_velocities[agent_idx], desired_velocity)\n        evasion_reward = max(0, dot_product) * 2.0\n        components['evasion_reward'] = evasion_reward\n        \n        capture_penalty = -20.0 if dist_to_nearest_pursuer <= capture_threshold else 0.0\n        components['capture_penalty'] = capture_penalty\n        \n        agent_pos = agent_positions[agent_idx]\n        boundary_penalty = 0.0\n        if (abs(agent_pos[0]) > world_size * 0.9 or \n            abs(agent_pos[1]) > world_size * 0.9):\n            boundary_penalty -= 1.0\n        components['boundary_penalty'] = boundary_penalty\n        \n        speed = np.linalg.norm(agent_velocities[agent_idx])\n        energy_penalty = -0.01 * speed\n        components['energy_penalty'] = energy_penalty\n    \n    total_reward = sum(components.values())\n    return total_reward, components",
+      "status": "success",
+      "fitness": 0.5656721076013309,
+      "metrics": {
+        "success_rate": 0.6208591677623758,
+        "avg_capture_time": 55.187060161044904,
+        "reward_components": {
+          "distance_reward": {
+            "mean": -1.4756311691854682,
+            "std": 0.3
+          },
+          "collision_penalty": {
+            "mean": -0.831949384671347,
+            "std": 0.2
+          },
+          "formation_reward": {
+            "mean": 0.8572227959207283,
+            "std": 0.15
+          }
+        },
+        "collaboration_metrics": {
+          "encirclement_angle_std": {
+            "mean": 0.2558327317229302
+          },
+          "min_agent_distance": {
+            "mean": 0.22552481502915772
+          }
+        }
+      }
+    },
+    {
+      "id": 1,
+      "code": "import numpy as np\n\ndef compute_reward(agent_name, observation, global_state, actions, world):\n    components = {}\n    \n    agent_positions = global_state['agent_positions']\n    agent_velocities = global_state['agent_velocities']\n    prey_position = global_state['prey_position']\n    distances_to_prey = global_state['distances_to_prey']\n    inter_agent_distances = global_state['inter_agent_distances']\n    is_adversary = global_state['is_adversary']\n    adversary_indices = global_state['adversary_indices']\n    prey_indices = global_state['prey_indices']\n    world_size = global_state['world_size']\n    capture_threshold = global_state['capture_threshold']\n    \n    all_agent_names = [f\"agent_{i}\" for i in range(len(agent_positions))]\n    agent_idx = all_agent_names.index(agent_name) if agent_name in all_agent_names else -1\n    \n    if is_adversary:\n        agent_idx_in_adversaries = adversary_indices.index(agent_idx)\n        dist_to_prey = distances_to_prey[agent_idx_in_adversaries]\n        \n        distance_reward = -0.2 * dist_to_prey\n        components['distance_reward'] = distance_reward\n        \n        other_adversaries = [i for i in adversary_indices if i != agent_idx]\n        formation_reward = 0.0\n        if len(other_adversaries) > 0:\n            other_positions = agent_positions[other_adversaries]\n            vectors_to_prey = other_positions - prey_position\n            angles = []\n            for vec in vectors_to_prey:\n                angle = np.arctan2(vec[1], vec[0])\n                angles.append(angle)\n            \n            min_gap = np.pi / 4\n            my_vector = agent_positions[agent_idx] - prey_position\n            my_angle = np.arctan2(my_vector[1], my_vector[0])\n            \n            gap_filled = True\n            for other_angle in angles:\n                angle_diff = abs((my_angle - other_angle + np.pi) % (2 * np.pi) - np.pi)\n                if angle_diff < min_gap:\n                    gap_filled = False\n                    break\n            \n            formation_reward = 3.0 if gap_filled else -2.0\n        components['formation_reward'] = formation_reward\n        \n        collision_penalty = 0.0\n        for other_idx in other_adversaries:\n            dist = inter_agent_distances[agent_idx, other_idx]\n            if dist < 0.25:\n                collision_penalty -= 3.0\n        components['collision_penalty'] = collision_penalty\n        \n        agent_pos = agent_positions[agent_idx]\n        boundary_penalty = 0.0\n        if (abs(agent_pos[0]) > world_size * 0.85 or \n            abs(agent_pos[1]) > world_size * 0.85):\n            boundary_penalty -= 1.5\n        components['boundary_penalty'] = boundary_penalty\n        \n        speed = np.linalg.norm(agent_velocities[agent_idx])\n        energy_penalty = -0.02 * speed\n        components['energy_penalty'] = energy_penalty\n        \n        is_prey_captured = np.any(distances_to_prey <= capture_threshold)\n        success_bonus = 15.0 if is_prey_captured else 0.0\n        components['success_bonus'] = success_bonus\n        \n    else:\n        agent_idx_in_preys = prey_indices.index(agent_idx)\n        dist_to_nearest_pur",
+      "status": "success",
+      "fitness": 0.7650598559831249,
+      "metrics": {
+        "success_rate": 0.8052156096121825,
+        "avg_capture_time": 40.155753629057656,
+        "reward_components": {
+          "distance_reward": {
+            "mean": -1.50867277943133,
+            "std": 0.3
+          },
+          "collision_penalty": {
+            "mean": -0.7405400794992665,
+            "std": 0.2
+          },
+          "formation_reward": {
+            "mean": 0.2863880748974156,
+            "std": 0.15
+          }
+        },
+        "collaboration_metrics": {
+          "encirclement_angle_std": {
+            "mean": 0.4803955072975004
+          },
+          "min_agent_distance": {
+            "mean": 0.38575836025163085
+          }
+        }
+      }
+    }
+  ],
+  "timestamp": "2026-02-10T18:33:06.825897",
+  "metadata": {}
+}

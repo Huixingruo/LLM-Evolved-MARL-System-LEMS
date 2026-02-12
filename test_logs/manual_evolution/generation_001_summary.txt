@@ -1,0 +1,107 @@
+Generation 1 Summary
+================================================================================
+
+Fitness: 0.7651
+
+Best Code:
+--------------------------------------------------------------------------------
+import numpy as np
+
+def compute_reward(agent_name, observation, global_state, actions, world):
+    components = {}
+    
+    agent_positions = global_state['agent_positions']
+    agent_velocities = global_state['agent_velocities']
+    prey_position = global_state['prey_position']
+    distances_to_prey = global_state['distances_to_prey']
+    inter_agent_distances = global_state['inter_agent_distances']
+    is_adversary = global_state['is_adversary']
+    adversary_indices = global_state['adversary_indices']
+    prey_indices = global_state['prey_indices']
+    world_size = global_state['world_size']
+    capture_threshold = global_state['capture_threshold']
+    
+    all_agent_names = [f"agent_{i}" for i in range(len(agent_positions))]
+    agent_idx = all_agent_names.index(agent_name) if agent_name in all_agent_names else -1
+    
+    if is_adversary:
+        agent_idx_in_adversaries = adversary_indices.index(agent_idx)
+        dist_to_prey = distances_to_prey[agent_idx_in_adversaries]
+        
+        distance_reward = -0.2 * dist_to_prey
+        components['distance_reward'] = distance_reward
+        
+        other_adversaries = [i for i in adversary_indices if i != agent_idx]
+        formation_reward = 0.0
+        if len(other_adversaries) > 0:
+            other_positions = agent_positions[other_adversaries]
+            vectors_to_prey = other_positions - prey_position
+            angles = []
+            for vec in vectors_to_prey:
+                angle = np.arctan2(vec[1], vec[0])
+                angles.append(angle)
+            
+            min_gap = np.pi / 4
+            my_vector = agent_positions[agent_idx] - prey_position
+            my_angle = np.arctan2(my_vector[1], my_vector[0])
+            
+            gap_filled = True
+            for other_angle in angles:
+                angle_diff = abs((my_angle - other_angle + np.pi) % (2 * np.pi) - np.pi)
+                if angle_diff < min_gap:
+                    gap_filled = False
+                    break
+            
+            formation_reward = 3.0 if gap_filled else -2.0
+        components['formation_reward'] = formation_reward
+        
+        collision_penalty = 0.0
+        for other_idx in other_adversaries:
+            dist = inter_agent_distances[agent_idx, other_idx]
+            if dist < 0.25:
+                collision_penalty -= 3.0
+        components['collision_penalty'] = collision_penalty
+        
+        agent_pos = agent_positions[agent_idx]
+        boundary_penalty = 0.0
+        if (abs(agent_pos[0]) > world_size * 0.85 or 
+            abs(agent_pos[1]) > world_size * 0.85):
+            boundary_penalty -= 1.5
+        components['boundary_penalty'] = boundary_penalty
+        
+        speed = np.linalg.norm(agent_velocities[agent_idx])
+        energy_penalty = -0.02 * speed
+        components['energy_penalty'] = energy_penalty
+        
+        is_prey_captured = np.any(distances_to_prey <= capture_threshold)
+        success_bonus = 15.0 if is_prey_captured else 0.0
+        components['success_bonus'] = success_bonus
+        
+    else:
+        agent_idx_in_preys = prey_indices.index(agent_idx)
+        dist_to_nearest_pur
+--------------------------------------------------------------------------------
+
+Reflection:
+--------------------------------------------------------------------------------
+**奖励分量诊断**：
+- distance_reward工作正常，均值接近-1.5，引导智能体接近目标
+- collision_penalty基本失效，均值接近0，说明智能体很少碰撞或惩罚不够明显
+- formation_reward方差很小，可能权重过低或触发条件过严
+
+**任务性能分析**：
+- 成功率80.52%，达标，但Candidate 0的成功率62.09%未达标，需要进一步优化
+- 平均捕获时间40.2步，处于较低水平，表现较好
+- 主要失败模式：智能体在圈外徘徊，不敢进圈
+
+**协同行为评估**：
+- 角度标准差0.48，包围不够均匀，存在扎堆现象
+- 最小智能体距离0.3858，接近碰撞阈值，需要更强的排斥力
+- 队形质量0.2864，有改进空间
+
+**改进建议**：
+1. 增大进圈奖励的权重（当前0.8572 → 1.0），鼓励更激进的接近
+2. 降低角度排斥的权重（当前0.2558 → 0.2），避免过度排斥导致不敢进圈
+3. 添加"全员进圈"的额外奖励，强化协同
+4. 调整碰撞惩罚的阈值（当前0.7405 → 0.8），给予更多容错空间
+--------------------------------------------------------------------------------

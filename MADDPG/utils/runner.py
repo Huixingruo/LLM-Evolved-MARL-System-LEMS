@@ -4,6 +4,11 @@ import csv
 import os
 import threading
 from datetime import datetime
+from .reward_logger import (
+    RewardComponentLogger, 
+    compute_encirclement_angle_std,
+    compute_formation_quality
+)
 
 class RUNNER:
 
@@ -35,6 +40,9 @@ class RUNNER:
         self.total_episodes = 0  # 总回合数
         self.capture_success_record = []  # 每个回合是否成功围捕（True/False）
         self.episode_steps_record = []  # 每个回合的步数
+        
+        # ========== 新增：奖励分量日志记录器 ==========
+        self.reward_logger = RewardComponentLogger(log_dir=os.path.join(os.path.dirname(__file__), '..', 'logs'))
 
         # [重点讲解 2] 模型设备迁移
 
@@ -151,6 +159,23 @@ class RUNNER:
                 for agent_id, r in reward.items():
                     agent_reward[agent_id] += r
 
+                # ========== 新增：记录奖励分量（每步都记录）==========
+                # 从环境中获取奖励分量并记录
+                # 注意：parallel_env包装器需要通过aec_env访问底层环境
+                raw_env = getattr(self.env, 'aec_env', self.env)  # 获取底层环境
+                
+                if hasattr(raw_env, 'last_reward_components'):
+                    for agent_id in self.env_agents:
+                        if agent_id in raw_env.last_reward_components:
+                            components = raw_env.last_reward_components[agent_id]
+                            if len(components) > 0:  # 确保有数据
+                                self.reward_logger.record_step(agent_id, components)
+                
+                # ========== 新增：记录协同行为指标 ==========
+                # 计算并记录协同指标
+                if step % 10 == 0:  # 每10步记录一次协同指标，避免过于频繁
+                    self._record_collaboration_metrics()
+                
                 # 5. 模型更新
                 # 不是每一步都更新，而是每隔 learn_interval 步更新一次，且要在热身结束后
                 # 开始学习 有学习开始条件 有学习频率
@@ -161,6 +186,7 @@ class RUNNER:
                     # 更新网络
                     # 软更新 Target Network (这是 DDPG/MADDPG 稳定的关键)
                     self.agent.update_target(self.par.tau)
+                
                 # 状态更新，准备进入下一步
                 obs = next_obs
 
@@ -284,6 +310,14 @@ class RUNNER:
 
         # 保存数据到文件（CSV格式）
         self.save_rewards_to_csv(self.all_adversary_avg_rewards, self.all_sum_rewards, early_stopped=early_stopped)
+        
+        # ========== 新增：保存奖励分量统计 ==========
+        self.reward_logger.episode_count = self.total_episodes
+        self.reward_logger.save_statistics()
+        self.reward_logger.save_summary_report()
+        print("\n" + "="*80)
+        self.reward_logger.print_summary()
+        print("="*80)
 
     def get_running_reward(self, arr):
 
@@ -363,6 +397,67 @@ class RUNNER:
         print(f"  Total episodes: {len(adversary_rewards)}")
         print(f"  Successful captures: {sum(capture_data)} ({sum(capture_data)/len(capture_data)*100:.1f}%)")
         print(f"  Average episode steps: {np.mean(steps_data):.1f}")
+    
+    def _record_collaboration_metrics(self):
+        """
+        计算并记录协同行为指标
+        """
+        try:
+            # 获取底层环境
+            raw_env = getattr(self.env, 'aec_env', self.env)
+            
+            # 获取所有智能体的位置
+            if not hasattr(raw_env, 'world') or not hasattr(raw_env.world, 'agents'):
+                return
+            
+            world = raw_env.world
+            
+            # 分离追捕者和逃跑者
+            adversaries = [agent for agent in world.agents if agent.adversary]
+            preys = [agent for agent in world.agents if not agent.adversary]
+            
+            if len(adversaries) < 2 or len(preys) < 1:
+                return
+            
+            # 获取位置
+            adversary_positions = np.array([agent.state.p_pos for agent in adversaries])
+            prey_position = preys[0].state.p_pos
+            
+            # 获取捕获阈值
+            capture_threshold = getattr(raw_env, 'capture_threshold', world.world_size * 0.2)
+            
+            # 计算协同指标
+            metrics = {}
+            
+            # 1. 围捕角度标准差
+            metrics['encirclement_angle_std'] = compute_encirclement_angle_std(
+                adversary_positions, prey_position
+            )
+            
+            # 2. 智能体间最小距离
+            min_dist = float('inf')
+            for i in range(len(adversaries)):
+                for j in range(i+1, len(adversaries)):
+                    dist = np.linalg.norm(adversaries[i].state.p_pos - adversaries[j].state.p_pos)
+                    min_dist = min(min_dist, dist)
+            metrics['min_agent_distance'] = min_dist if min_dist != float('inf') else 0.0
+            
+            # 3. 到猎物的平均距离
+            distances_to_prey = [np.linalg.norm(adv.state.p_pos - prey_position) for adv in adversaries]
+            metrics['avg_distance_to_prey'] = np.mean(distances_to_prey)
+            
+            # 4. 队形质量
+            metrics['formation_quality'] = compute_formation_quality(
+                adversary_positions, prey_position, capture_threshold
+            )
+            
+            # 记录指标
+            self.reward_logger.record_collaboration_metrics(metrics)
+            
+        except Exception as e:
+            # 静默失败，避免影响训练
+            pass
+
 #============================================================================================================
 
     def evaluate(self):

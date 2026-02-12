@@ -1,0 +1,65 @@
+# LLM奖励函数设计智能体配置文件
+# Author: LEMS Project
+# Date: 2026-02-03
+# Version: 1.0
+
+# LLM配置
+llm:
+  provider: "openai"  # 可选: openai, anthropic, zhipu, deepseek, etc.
+  model: "generalv3"  # 模型名称
+  api_key: "rsOJPSwAJaAKvjEjDFuh:wDjdSiGbLkwWIoepTUii"  # API密钥（建议使用环境变量）
+  base_url: 'https://spark-api-open.xf-yun.com/v1'  # 自定义API端点（如国产大模型）
+  timeout: 120  # 请求超时时间（秒）
+  max_retries: 3  # 最大重试次数
+
+# 代码生成配置
+generation:
+  num_candidates: 4  # 每代生成的候选数量
+  temperature: 0.8  # 生成温度（越高越随机，增加多样性）
+  max_tokens: 2500  # 最大生成Token数
+  top_p: 0.95  # 核采样参数
+  frequency_penalty: 0.0  # 频率惩罚
+  presence_penalty: 0.0  # 存在惩罚
+
+# 反思分析配置
+reflection:
+  temperature: 0.3  # 分析温度（较低保证准确性）
+  max_tokens: 1500  # 最大Token数
+  top_p: 0.9
+
+# 进化配置
+evolution:
+  max_generations: 10  # 最大进化代数
+  population_size: 4  # 每代种群大小
+  mutation_rate: 0.8  # 突变率（生成变体的比例）
+  crossover_enabled: false  # 是否启用交叉（暂不支持）
+
+# 训练配置
+training:
+  episode_num: 100  # 每个候选训练的回合数（轻量化）
+  episode_length: 100  # 每回合最大步数
+  parallel_workers: 4  # 并行训练数量
+  timeout: 1200  # 单个训练任务超时时间（秒）
+  use_gpu: True  # 是否使用GPU
+
+# 日志配置
+logging:
+  save_dir: "experiments"  # 实验保存目录
+  verbose: true  # 是否打印详细日志
+  save_interval: 1  # 每隔多少代保存一次
+  keep_all_generations: true  # 是否保留所有代的记录
+
+# Fitness计算配置
+fitness:
+  # Fitness = w1*success_rate + w2*(-avg_capture_time) + w3*formation_quality
+  weights:
+    success_rate: 1.0  # 成功率权重
+    capture_time: -0.001  # 捕获时间权重（负数，越小越好）
+    formation_quality: 0.3  # 队形质量权重
+    collision_penalty: -0.5  # 碰撞惩罚权重
+  
+  # 归一化参数
+  normalize:
+    max_capture_time: 100  # 最大捕获时间（用于归一化）
+    min_success_rate: 0.0  # 最小成功率
+    max_success_rate: 1.0  # 最大成功率
