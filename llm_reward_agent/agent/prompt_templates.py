@@ -1,13 +1,366 @@
 """
 提示词模板库
 包含LLM生成奖励函数所需的所有提示词模板
-
-Author: LEMS Project
-Date: 2026-02-03
-Version: 1.0
 """
 
 from typing import Dict, Any
+
+
+# ========================================
+# 预定义的环境上下文（从 env_context_output.txt 提取）
+# ========================================
+
+PREDEFINED_ENV_CONTEXT = {
+    "env_name": "simple_tag_env",
+    "runtime_spaces": {
+        "env_class": "Custom_raw_env",
+        "num_agents": 4,
+        "action_spaces": {
+            "adversary_0": "Box - shape=(2,)",
+            "adversary_1": "Box - shape=(2,)",
+            "adversary_2": "Box - shape=(2,)",
+            "agent_0": "Box - shape=(2,)"
+        },
+        "observation_spaces": {
+            "adversary_0": "shape=(12,), dtype=float32",
+            "adversary_1": "shape=(12,), dtype=float32",
+            "adversary_2": "shape=(12,), dtype=float32",
+            "agent_0": "shape=(10,), dtype=float32"
+        }
+    },
+    "observation_semantics": {
+        "description": "Simple Tag 场景，观测向量按以下顺序拼接：return np.concatenate([norm_self_vel] + [norm_self_pos] + entity_pos + other_pos + other_vel])",
+        "adversary": {
+            "0:2": {"name": "Self Velocity", "desc": "自身速度 (vx, vy)，归一化到 [-1, 1]"},
+            "2:4": {"name": "Self Position", "desc": "自身绝对位置 (x, y)，归一化到 [-1, 1]"},
+            "4:6": {"name": "Rel Pos (Adversary 1)", "desc": "队友1相对于自己的位置"},
+            "6:8": {"name": "Rel Pos (Adversary 2)", "desc": "队友2相对于自己的位置"},
+            "8:10": {"name": "Rel Pos (Prey)", "desc": "猎物相对于自己的位置 ← 核心！"},
+            "10:12": {"name": "Prey Velocity", "desc": "猎物的速度，归一化到 [-1, 1]"}
+        },
+        "agent": {
+            "0:2": {"name": "Self Velocity", "desc": "自身速度"},
+            "2:4": {"name": "Self Position", "desc": "自身位置"},
+            "4:6": {"name": "Rel Pos (Adv 1)", "desc": "追捕者1相对于自己的位置"},
+            "6:8": {"name": "Rel Pos (Adv 2)", "desc": "追捕者2相对于自己的位置"},
+            "8:10": {"name": "Rel Pos (Adv 3)", "desc": "追捕者3相对于自己的位置"}
+        }
+    },
+    "agent_info": {
+        "num_adversaries": 3,
+        "num_good": 1,
+        "num_obstacles": 2
+    },
+    "physical_constants": {
+        "world_size": 2.5,
+        "max_force": 1.0,
+        "capture_threshold": 0.5,
+        "dim_p": 2,
+        "dim_c": 0
+    },
+    "code_snippet": '''"""
+追捕逃逸环境 (Simple Tag Environment)
+"""
+
+class Custom_raw_env(SimpleEnv, EzPickle):
+
+    def __init__(self, num_good=1, num_adversaries=3, num_obstacles=2, max_cycles=100, continuous_actions=False, render_mode=None, dynamic_rescaling=False, world_size=2.5):
+        EzPickle.__init__(self, num_good=num_good, num_adversaries=num_adversaries, num_obstacles=num_obstacles, max_cycles=max_cycles, continuous_actions=continuous_actions, render_mode=render_mode)
+        scenario = Scenario()
+        world = scenario.make_world(num_good, num_adversaries, num_obstacles, _world_size=world_size)
+        SimpleEnv.__init__(self, scenario=scenario, world=world, render_mode=render_mode, max_cycles=max_cycles, continuous_actions=continuous_actions, dynamic_rescaling=dynamic_rescaling)
+        self.world_size = world_size
+        self.max_force = 1.0
+        self.capture_threshold = self.world_size * 0.2
+        self.history_positions = {agent.name: [] for agent in world.agents}
+        self.last_reward_components = {agent.name: {} for agent in world.agents}
+        self.current_actions = {}
+        world._env_instance = self
+        self._init_spaces()
+
+    def _init_spaces(self):
+        """
+        初始化动作空间和观测空间
+
+        空间结构说明：
+        - 动作空间：Box(2,) for continuous, Discrete(5) for discrete
+        - 观测空间：Box(n,) 包含自身状态、相对位置等
+        """
+        self.action_spaces = dict()
+        self.observation_spaces = dict()
+        state_dim = 0
+        for agent in self.world.agents:
+            if agent.movable:
+                if self.continuous_actions:
+                    space_dim = self.world.dim_p
+                else:
+                    space_dim = self.world.dim_p * 2 + 1
+            else:
+                space_dim = 1
+            if agent.silent == False:
+                if self.continuous_actions:
+                    space_dim += self.world.dim_c
+                else:
+                    space_dim *= self.world.dim_c
+            obs_dim = len(self.scenario.observation(agent, self.world))
+            state_dim += obs_dim
+            if self.continuous_actions:
+                self.action_spaces[agent.name] = gymnasium.spaces.Box(low=-1.0, high=1.0, shape=(space_dim,), dtype=np.float32)
+            else:
+                self.action_spaces[agent.name] = gymnasium.spaces.Discrete(space_dim)
+            self.observation_spaces[agent.name] = gymnasium.spaces.Box(low=-np.float32(np.inf), high=+np.float32(np.inf), shape=(obs_dim,), dtype=np.float32)
+        self.state_space = gymnasium.spaces.Box(low=-np.float32(np.inf), high=+np.float32(np.inf), shape=(state_dim,), dtype=np.float32)
+
+    def _set_action(self, action, agent, action_space, time=None):
+        """
+        设置智能体动作
+
+        将动作转换为物理力：
+        - 连续动作：直接作为力向量
+        - 离散动作：转换为方向向量
+        """
+        agent.action.u = np.zeros(self.world.dim_p)
+        agent.action.c = np.zeros(self.world.dim_c)
+        if agent.movable:
+            agent.action.u = np.zeros(self.world.dim_p)
+            if self.continuous_actions:
+                agent.action.u[0] = action[0][0]
+                agent.action.u[1] = action[0][1]
+            else:
+                if action[0] == 1:
+                    agent.action.u[0] = -1.0
+                if action[0] == 2:
+                    agent.action.u[0] = +1.0
+                if action[0] == 3:
+                    agent.action.u[1] = -1.0
+                if action[0] == 4:
+                    agent.action.u[1] = +1.0
+        agent.action.u = np.clip(agent.action.u, -self.max_force, self.max_force)
+env = make_env(Custom_raw_env)
+parallel_env = parallel_wrapper_fn(env)
+
+class Scenario(BaseScenario):
+
+    def make_world(self, num_good=1, num_adversaries=3, num_obstacles=2, _world_size=2.5):
+        """
+        核心物理常量（LLM需要理解）
+        | 常量名           | 默认值      | 物理含义                    |
+        |-----------------|-------------|----------------------------|
+        | world_size      | 2.5         | 世界边界 (±2.5)            |
+        | dim_p           | 2           | 位置空间维度 (x, y)         |
+        | dim_c           | 0           | 通信通道维度（无通信）       |
+        | dt              | 0.1         | 物理模拟时间步长            |
+        | damping         | 0.2         | 速度阻尼系数                |
+        | capture_threshold | 0.5       | 围捕判定距离 (world_size*0.2) |
+        | max_force       | 1.0         | 最大作用力                  |
+        | max_speed       | 1.0或1.3     | 智能体最大速度              |
+        | agent_size      | 0.15        | 智能体半径                  |
+
+        创建世界
+
+        智能体配置：
+        - 追捕者 (adversary): num_adversaries 个
+        - 逃跑者 (agent): num_good 个
+        """
+        world = CustomWorld()
+        world.world_size = _world_size
+        world.dim_c = 0
+        world.dim_p = 2
+        world.dt = 0.1
+        world.damping = 0.2
+        num_agents = num_adversaries + num_good
+        world.agents = [Agent() for i in range(num_agents)]
+        for i, agent in enumerate(world.agents):
+            agent.adversary = True if i < num_adversaries else False
+            base_name = 'adversary' if agent.adversary else 'agent'
+            base_index = i if i < num_adversaries else i - num_adversaries
+            agent.name = f'{base_name}_{base_index}'
+            agent.collide = True
+            agent.silent = True
+            base_size = _world_size * 0.1
+            agent.size = base_size * 0.6
+            agent.initial_mass = 0.8
+            agent.accel = None
+            agent.max_speed = 1.0 if agent.adversary else 1.3
+        world.landmarks = [Landmark() for i in range(num_obstacles)]
+        for i, landmark in enumerate(world.landmarks):
+            landmark.name = 'landmark %d' % i
+            landmark.collide = True
+            landmark.movable = False
+            landmark.size = 0.2
+            landmark.boundary = False
+        return world
+
+    def is_collision(self, agent1, agent2):
+        """检测碰撞"""
+        delta_pos = agent1.state.p_pos - agent2.state.p_pos
+        dist = np.sqrt(np.sum(np.square(delta_pos)))
+        dist_min = agent1.size + agent2.size
+        return True if dist < dist_min else False
+
+    def good_agents(self, world):
+        """返回逃跑者列表"""
+        return [agent for agent in world.agents if not agent.adversary]
+
+    def adversaries(self, world):
+        """返回追捕者列表"""
+        return [agent for agent in world.agents if agent.adversary]
+
+    def reward(self, agent, world):
+        """
+        奖励函数入口
+
+        奖励设计说明：
+        - 追捕者奖励：使用可插拔的 reward_function.py
+        - 逃跑者奖励：在此文件中实现
+        """
+        global_state = self._build_global_state(agent, world)
+        env_instance = getattr(world, '_env_instance', None)
+        actions = getattr(env_instance, 'current_actions', {}) if env_instance is not None else {}
+        if agent.adversary:
+            total_reward, components = reward_function.compute_reward(agent.name, None, global_state, actions, world)
+        else:
+            total_reward, components = self._agent_reward(agent, global_state)
+        if env_instance is not None:
+            env_instance.last_reward_components[agent.name] = components
+        return total_reward
+
+    def _build_global_state(self, agent, world):
+        """
+        构建全局状态信息
+
+        global_state 包含：
+        - agent_positions: 所有智能体位置 (n_agents, 2)
+        - agent_velocities: 所有智能体速度 (n_agents, 2)
+        - prey_position: 逃跑者位置 (2,)
+        - prey_velocity: 逃跑者速度 (2,)
+        - distances_to_prey: 每个追捕者到逃跑者的距离
+        - inter_agent_distances: 智能体间距离矩阵
+        - is_adversary: 当前是否为追捕者
+        - adversary_indices: 追捕者索引
+        - prey_indices: 逃跑者索引
+        - world_size: 世界大小
+        - capture_threshold: 围捕阈值
+        """
+        adversaries = self.adversaries(world)
+        preys = self.good_agents(world)
+        all_agents = world.agents
+        agent_positions = np.array([a.state.p_pos for a in all_agents])
+        agent_velocities = np.array([a.state.p_vel for a in all_agents])
+        if len(preys) > 0:
+            prey_position = preys[0].state.p_pos
+            prey_velocity = preys[0].state.p_vel
+        else:
+            prey_position = np.zeros(2)
+            prey_velocity = np.zeros(2)
+        distances_to_prey = np.array([np.linalg.norm(adv.state.p_pos - prey_position) for adv in adversaries])
+        n_agents = len(all_agents)
+        inter_agent_distances = np.zeros((n_agents, n_agents))
+        for i, agent_i in enumerate(all_agents):
+            for j, agent_j in enumerate(all_agents):
+                if i != j:
+                    inter_agent_distances[i][j] = np.linalg.norm(agent_i.state.p_pos - agent_j.state.p_pos)
+        adversary_indices = [i for i, a in enumerate(all_agents) if a.adversary]
+        prey_indices = [i for i, a in enumerate(all_agents) if not a.adversary]
+        global_state = {'agent_positions': agent_positions, 'agent_velocities': agent_velocities, 'prey_position': prey_position, 'prey_velocity': prey_velocity, 'distances_to_prey': distances_to_prey, 'inter_agent_distances': inter_agent_distances, 'is_adversary': agent.adversary, 'adversary_indices': adversary_indices, 'prey_indices': prey_indices, 'world_size': world.world_size, 'capture_threshold': world.world_size * 0.2}
+        return global_state
+
+    def _agent_reward(self, agent, global_state):
+        """
+        逃跑者奖励函数（固定不变）
+
+        核心策略：最大化与最近追捕者的距离 + 避免出界
+
+        奖励分量：
+        - escape_reward: 逃逸奖励（远离威胁）
+        - capture_penalty: 被捕获惩罚
+        - boundary_penalty: 边界惩罚
+        """
+        rew = 0
+        components = {}
+        world_size = global_state['world_size']
+        capture_threshold = global_state['capture_threshold']
+        agent_positions = global_state['agent_positions']
+        adversary_indices = global_state['adversary_indices']
+        prey_indices = global_state['prey_indices']
+        agent_idx = prey_indices[0]
+        agent_pos = agent_positions[agent_idx]
+        adversary_positions = agent_positions[adversary_indices]
+        escape_reward = 0.0
+        capture_penalty = 0.0
+        if len(adversary_indices) > 0:
+            dists = [np.linalg.norm(adversary_positions[i] - agent_pos) for i in range(len(adversary_indices))]
+            min_dist = min(dists)
+            fear_radius = world_size * 0.5
+            if min_dist < fear_radius:
+                escape_reward = -2.0 * (fear_radius - min_dist)
+            else:
+                escape_reward = 0.1
+            rew += escape_reward
+            components['escape_reward'] = escape_reward
+            if min_dist < capture_threshold:
+                capture_penalty = -10.0
+                rew += capture_penalty
+                components['capture_penalty'] = capture_penalty
+        boundary_penalty_total = 0.0
+        for p in range(2):
+            x = abs(agent_pos[p])
+            boundary_penalty = self._calculate_bound_penalty(x, world_size)
+            boundary_penalty_total += boundary_penalty
+        rew -= boundary_penalty_total
+        components['boundary_penalty'] = -boundary_penalty_total
+        return (rew, components)
+
+    def _calculate_bound_penalty(self, x, world_size):
+        """计算边界惩罚"""
+        boundary_start = world_size * 0.96
+        full_boundary = world_size
+        if x < boundary_start:
+            return 0
+        if x < full_boundary:
+            return (x - boundary_start) * 10
+        return min(np.exp(2 * x - 2 * full_boundary), 10)
+
+    def observation(self, agent, world):
+        """
+        观测函数
+
+        观测空间结构：
+        [自身速度(2), 自身位置(2), 地标相对位置(2*num_obstacles),
+         其他智能体相对位置(2*n_others), 逃跑者速度(2)]
+
+        归一化说明：
+        - 位置归一化到 [-1, 1]
+        - 速度归一化到 [-1, 1]
+        """
+        entity_pos = []
+        for entity in world.landmarks:
+            if not entity.boundary:
+                relative_entity_pos = (entity.state.p_pos - agent.state.p_pos) / world.world_size
+                entity_pos.append(relative_entity_pos)
+        other_pos = []
+        other_vel = []
+        for other in world.agents:
+            if other is agent:
+                continue
+            relative_pos = (other.state.p_pos - agent.state.p_pos) / world.world_size
+            other_pos.append(relative_pos)
+            if not other.adversary:
+                norm_vel = other.state.p_vel / other.max_speed
+                other_vel.append(norm_vel)
+        norm_self_vel = agent.state.p_vel / world.world_size
+        norm_self_pos = agent.state.p_pos / world.world_size
+        return np.concatenate([norm_self_vel] + [norm_self_pos] + entity_pos + other_pos + other_vel])
+'''}
+
+
+# 预定义的任务描述
+PREDEFINED_TASK_DESCRIPTION = """设计追捕者(adversary)的奖励函数：
+- **目标**: 3个追捕者协同围捕1个逃跑者
+- **成功条件**: 所有追捕者进入逃跑者的capture_threshold范围内
+- **关键**: 设计协作策略，使追捕者形成包围圈
+
+逃跑者的奖励函数已固定，不需要重新设计。"""
 
 
 class PromptTemplates:
@@ -100,7 +453,7 @@ def compute_reward(agent_name, observation, global_state, actions, world):
                 'world_size': float,                 # 世界大小
                 'capture_threshold': float,          # 围捕阈值
             }
-        actions (dict): 所有智能体的动作 {agent_name: action_vector}
+        actions (dict): 所有智能体的动作 {{agent_name: action_vector}}
         world (World): PettingZoo的World对象
     
     Returns:
@@ -396,6 +749,307 @@ def compute_reward(agent_name, observation, global_state, actions, world):
 ```
 """
         return prompt
+    
+    # ========================================
+    # 使用预定义环境上下文的方法（推荐使用）
+    # ========================================
+    
+    @staticmethod
+    def initial_generation_prompt_with_predefined_context(
+        task_description: str = PREDEFINED_TASK_DESCRIPTION,
+        env_context: Dict = None
+    ) -> str:
+        """
+        第一代生成提示词（使用预定义环境上下文）
+        
+        Args:
+            task_description: 任务描述（默认为 PREDEFINED_TASK_DESCRIPTION）
+            env_context: 环境上下文（默认为 PREDEFINED_ENV_CONTEXT）
+        
+        Returns:
+            str: 完整提示词
+        """
+        if env_context is None:
+            env_context = PREDEFINED_ENV_CONTEXT
+        
+        # 构建观测空间和动作空间描述
+        obs_spaces = env_context.get('runtime_spaces', {}).get('observation_spaces', {})
+        act_spaces = env_context.get('runtime_spaces', {}).get('action_spaces', {})
+        obs_semantics = env_context.get('observation_semantics', {})
+        agent_info = env_context.get('agent_info', {})
+        physical_constants = env_context.get('physical_constants', {})
+        code_snippet = env_context.get('code_snippet', '')
+        
+        # 格式化观测空间表格
+        obs_table = "**观测空间 (Ground Truth):**\n"
+        for agent_name, obs_info in obs_spaces.items():
+            obs_table += f"- {agent_name}: {obs_info}\n"
+        
+        # 格式化动作空间表格
+        act_table = "**动作空间 (Ground Truth):**\n"
+        for agent_name, act_info in act_spaces.items():
+            act_table += f"- {agent_name}: {act_info}\n"
+        
+        # 格式化观测语义
+        obs_semantics_text = obs_semantics.get('description', '') + "\n\n"
+        obs_semantics_text += "**追捕者 (adversary) 的观测向量索引：**\n"
+        for key, info in obs_semantics.get('adversary', {}).items():
+            obs_semantics_text += f"- [{key}]: {info['name']} - {info['desc']}\n"
+        obs_semantics_text += "\n**逃跑者 (agent) 的观测向量索引：**\n"
+        for key, info in obs_semantics.get('agent', {}).items():
+            obs_semantics_text += f"- [{key}]: {info['name']} - {info['desc']}\n"
+        
+        # 格式化物理常量
+        constants_text = "| 常量名 | 值 | 物理含义 |\n"
+        constants_text += "|-------|-----|---------|\n"
+        for key, val in physical_constants.items():
+            desc = {
+                'world_size': '世界边界 (+/-world_size)',
+                'max_force': '最大作用力',
+                'capture_threshold': '围捕判定距离',
+                'dim_p': '位置空间维度 (x, y)',
+                'dim_c': '通信通道维度'
+            }.get(key, '')
+            constants_text += f"| {key} | {val} | {desc} |\n"
+        
+        prompt = f"""你是一位专业的强化学习奖励工程师。请根据以下信息设计奖励函数。
+
+# 任务描述
+{task_description}
+
+# 环境配置
+
+## 智能体信息
+- 追捕者 (adversary): {agent_info.get('num_adversaries', 3)} 个
+- 逃跑者 (agent): {agent_info.get('num_good', 1)} 个
+- 障碍物 (obstacles): {agent_info.get('num_obstacles', 2)} 个
+
+## 运行时空间分析
+
+### 动作空间 (Ground Truth):
+{act_table}
+
+### 观测空间 (Ground Truth):
+{obs_table}
+
+## 观测向量切片语义
+
+{obs_semantics_text}
+
+## 核心环境逻辑（渲染剥离后的代码）
+
+```python
+{code_snippet}
+```
+
+## 关键物理常量
+
+{constants_text}
+
+# 要求
+
+请实现 compute_reward 函数，函数签名如下：
+
+```
+def compute_reward(agent_name, observation, global_state, actions, world):
+    \"\"\"
+    可插拔的奖励函数接口
+    
+    Args:
+        agent_name (str): 当前智能体名称 (e.g., "adversary_0", "agent_0")
+        observation (np.ndarray): 当前智能体的观测向量
+        global_state (dict): 全局状态信息
+            - 'agent_positions': np.ndarray,       # shape: (n_agents, 2)
+            - 'agent_velocities': np.ndarray,      # shape: (n_agents, 2)
+            - 'prey_position': np.ndarray,         # shape: (2,)
+            - 'prey_velocity': np.ndarray,         # shape: (2,)
+            - 'distances_to_prey': np.ndarray,     # shape: (n_adversaries,)
+            - 'inter_agent_distances': np.ndarray, # shape: (n_agents, n_agents)
+            - 'is_adversary': bool,                # 当前智能体是否为追捕者
+            - 'adversary_indices': list,           # 所有追捕者的索引
+            - 'prey_indices': list,                # 所有逃跑者的索引
+            - 'world_size': float,                 # 世界大小
+            - 'capture_threshold': float,          # 围捕阈值
+        actions (dict): 所有智能体的动作 {{agent_name: action_vector}}
+        world (World): PettingZoo的World对象
+    
+    Returns:
+        reward (float): 标量奖励值
+        components (dict): 奖励分量字典（用于日志分析）
+    \"\"\"
+    # 你的代码实现
+    pass
+```
+
+## 设计要点
+
+1. **奖励分量必须是字典**，包含各个奖励分量（用于日志分析），例如：
+   ```python
+   components = {{
+       'distance_reward': ..., 
+       'collision_penalty': ..., 
+       'formation_reward': ...,
+       'boundary_penalty': ...
+   }}
+   ```
+
+2. **只设计追捕者的奖励函数**（逃跑者的奖励函数已固定）：
+   - 在函数内部通过 `if global_state['is_adversary']` 判断当前是否为追捕者
+   - 如果不是追捕者（逃跑者），返回0或固定的小奖励
+
+3. **追捕者奖励函数设计要点**：
+   - 鼓励智能体接近并围捕目标
+   - 惩罚智能体之间的碰撞
+   - 奖励形成均匀的包围圈
+   - 惩罚越界行为
+   - 适当惩罚能耗（可选）
+
+4. **只输出Python代码**，不要有任何额外解释。代码需要符合PEP8规范。
+
+5. **必须导入numpy**: 在代码开头加上 `import numpy as np`
+
+# 输出格式
+
+只输出完整的Python代码，使用以下格式：
+
+```python
+import numpy as np
+
+def compute_reward(agent_name, observation, global_state, actions, world):
+    components = {{}}
+    
+    # 你的代码实现
+    # ...
+    
+    total_reward = sum(components.values())
+    return total_reward, components
+```
+
+注意：不要输出任何解释性文字，只输出代码块。
+"""
+        
+        return prompt
+    
+    @staticmethod
+    def evolution_prompt_with_predefined_context(
+        task_description: str = PREDEFINED_TASK_DESCRIPTION,
+        parent_code: str = "",
+        reflection: str = "",
+        n_candidates: int = 4,
+        env_context: Dict = None
+    ) -> str:
+        """
+        进化生成提示词（使用预定义环境上下文）
+        
+        Args:
+            task_description: 任务描述（默认为 PREDEFINED_TASK_DESCRIPTION）
+            parent_code: 上一代最优代码
+            reflection: 上一代的训练反思
+            n_candidates: 需要生成的候选数量
+            env_context: 环境上下文（默认为 PREDEFINED_ENV_CONTEXT）
+        
+        Returns:
+            str: 完整提示词
+        """
+        if env_context is None:
+            env_context = PREDEFINED_ENV_CONTEXT
+        
+        agent_info = env_context.get('agent_info', {})
+        obs_spaces = env_context.get('runtime_spaces', {}).get('observation_spaces', {})
+        act_spaces = env_context.get('runtime_spaces', {}).get('action_spaces', {})
+        
+        prompt = f"""你是一位专业的强化学习奖励工程师。基于上一代的训练反馈，改进奖励函数。
+
+# 任务描述
+{task_description}
+
+# 环境配置（简要）
+- 追捕者: {agent_info.get('num_adversaries', 3)} 个
+- 逃跑者: {agent_info.get('num_good', 1)} 个
+- 动作空间: {list(act_spaces.values())[0] if act_spaces else 'Box(2,)'}
+- 观测空间: {list(obs_spaces.values())[0] if obs_spaces else 'Box(12,)'}
+
+# 上一代最优代码
+
+```python
+{parent_code}
+```
+
+# 训练反馈与反思
+
+{reflection}
+
+# 改进要求
+
+基于上述反思，对代码进行修改，生成 **{n_candidates} 个不同的变体（Mutation）**。
+
+每个变体应该：
+1. 基于上一代代码进行改进
+2. 针对反思中提到的问题进行调整：
+   - 调整权重系数（增大/减小某些分量的权重）
+   - 增加/删除奖励项
+   - 改变函数形式（线性 → 指数 / 分段函数 / 势场函数等）
+3. 每个变体应有明显差异（不要只是微调权重）
+4. 保持代码的可读性和可解释性
+
+## 变体生成策略建议
+
+- **变体0**: 保守改进（微调权重，保持结构）
+- **变体1**: 激进改进（大幅调整权重或函数形式）
+- **变体2**: 添加新的奖励分量
+- **变体3**: 简化奖励函数（删除不重要的分量）
+
+# 输出格式
+
+输出 {n_candidates} 个完整的Python代码块，每个代码块之间用注释 `# === VARIANT {{i}} ===` 分隔。
+
+示例：
+
+```python
+# === VARIANT 0 ===
+import numpy as np
+
+def compute_reward(agent_name, observation, global_state, actions, world):
+    components = {{}}
+    # ... 变体0的实现 ...
+    total_reward = sum(components.values())
+    return total_reward, components
+
+# === VARIANT 1 ===
+import numpy as np
+
+def compute_reward(agent_name, observation, global_state, actions, world):
+    components = {{}}
+    # ... 变体1的实现 ...
+    total_reward = sum(components.values())
+    return total_reward, components
+
+# === VARIANT 2 ===
+import numpy as np
+
+def compute_reward(agent_name, observation, global_state, actions, world):
+    components = {{}}
+    # ... 变体2的实现 ...
+    total_reward = sum(components.values())
+    return total_reward, components
+
+# === VARIANT 3 ===
+import numpy as np
+
+def compute_reward(agent_name, observation, global_state, actions, world):
+    components = {{}}
+    # ... 变体3的实现 ...
+    total_reward = sum(components.values())
+    return total_reward, components
+```
+
+**注意**：
+1. 只输出代码，不要有任何额外解释
+2. 每个变体必须是完整的、可独立运行的函数
+3. 确保代码语法正确，符合PEP8规范
+"""
+        
+        return prompt
 
 
 # ========================================
@@ -404,53 +1058,19 @@ def compute_reward(agent_name, observation, global_state, actions, world):
 if __name__ == "__main__":
     print("测试提示词模板...")
     
-    # 构造测试环境上下文
-    test_env_context = {
-        'env_name': 'simple_tag_env',
-        'observation_space': 'Box(16,)',
-        'action_space': 'Box(2,)',
-        'agent_info': {
-            'num_adversaries': 3,
-            'num_good': 1,
-            'num_obstacles': 0
-        },
-        'physical_constants': {
-            'max_force': 1.0,
-            'capture_threshold': 0.5,
-            'world_size': 2.5
-        },
-        'code_snippet': '# 环境代码片段...\n# ...'
-    }
-    
-    test_task_description = """
-任务：3个追捕智能体协同围捕1个逃逸目标。
-
-要求：
-1. 追捕者需要接近并包围目标
-2. 追捕者之间避免碰撞
-3. 形成均匀的包围圈
-4. 在尽可能短的时间内完成围捕
-
-注意：逃跑者的奖励函数已固定，不需要重新设计。
-只需设计追捕者的奖励函数。
-    """
-    
-    # 测试初始生成提示词
-    print("\n=== 测试初始生成提示词 ===")
-    initial_prompt = PromptTemplates.initial_generation_prompt(
-        test_env_context,
-        test_task_description
-    )
-    print(f"提示词长度: {len(initial_prompt)} 字符")
-    print(f"前500字符:\n{initial_prompt[:500]}...")
+    # 测试使用预定义上下文的方法
+    print("\n=== 测试使用预定义上下文的方法 ===")
+    predefined_prompt = PromptTemplates.initial_generation_prompt_with_predefined_context()
+    print(f"提示词长度: {len(predefined_prompt)} 字符")
+    print(f"前800字符:\n{predefined_prompt[:800]}...")
+    print("\n" + "="*80)
     
     # 测试进化提示词
-    print("\n=== 测试进化提示词 ===")
     test_parent_code = """
 import numpy as np
 
 def compute_reward(agent_name, observation, global_state, actions, world):
-    components = {}
+    components = {{}}
     dist = np.linalg.norm(global_state['agent_positions'][0] - global_state['prey_position'])
     components['distance_reward'] = -dist
     total_reward = sum(components.values())
@@ -462,32 +1082,15 @@ def compute_reward(agent_name, observation, global_state, actions, world):
 建议：增加角度排斥力，鼓励均匀分布。
 """
     
-    evolution_prompt = PromptTemplates.evolution_prompt(
-        test_env_context,
-        test_task_description,
-        test_parent_code,
-        test_reflection,
+    print("\n=== 测试进化提示词（使用预定义上下文）===")
+    evolution_prompt = PromptTemplates.evolution_prompt_with_predefined_context(
+        parent_code=test_parent_code,
+        reflection=test_reflection,
         n_candidates=4
     )
     print(f"提示词长度: {len(evolution_prompt)} 字符")
-    print(f"前500字符:\n{evolution_prompt[:500]}...")
+    print(f"前800字符:\n{evolution_prompt[:800]}...")
     
-    # 测试反思提示词
-    print("\n=== 测试反思提示词 ===")
-    test_logs = """
-Candidate 0: 成功率 0.75, 平均时间 48 步
-  - distance_reward: -1.23 ± 0.45
-  - collision_penalty: -0.05 ± 0.12
-  - formation_reward: 0.34 ± 0.08
-
-Candidate 1: 成功率 0.68, 平均时间 52 步
-  - distance_reward: -1.45 ± 0.52
-  - collision_penalty: -0.15 ± 0.25
-  - formation_reward: 0.21 ± 0.06
-"""
-    
-    reflection_prompt = PromptTemplates.reflection_prompt(test_logs)
-    print(f"提示词长度: {len(reflection_prompt)} 字符")
-    print(f"前500字符:\n{reflection_prompt[:500]}...")
-    
-    print("\n✅ 提示词模板测试完成！")
+    print("\n" + "="*80)
+    print("✅ 预定义上下文提示词测试完成！")
+    print("="*80)

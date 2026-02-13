@@ -1,6 +1,6 @@
 """
 奖励函数设计智能体
-整合LLM、记忆、上下文提取等模块，实现完整的奖励函数进化流程
+整合LLM、记忆等模块，实现完整的奖励函数进化流程
 
 Author: LEMS Project
 Date: 2026-02-03
@@ -14,9 +14,8 @@ import yaml
 from typing import List, Dict, Tuple, Optional
 
 from .llm_interface import LLMInterface
-from .prompt_templates import PromptTemplates
+from .prompt_templates import PromptTemplates, PREDEFINED_ENV_CONTEXT, PREDEFINED_TASK_DESCRIPTION
 from .memory import EvolutionaryMemory
-from ..tools.context_extractor import EnvironmentContextExtractor
 
 
 class RewardDesignAgent:
@@ -58,18 +57,15 @@ class RewardDesignAgent:
         )
         self.memory = EvolutionaryMemory(save_dir=save_dir)
         
-        print("[3/4] 初始化上下文提取器...")
-        self.context_extractor = EnvironmentContextExtractor()
-        
-        print("[4/4] 初始化提示词模板...")
+        print("[3/4] 初始化提示词模板...")
         self.prompt_builder = PromptTemplates()
         
         # 状态变量
-        self.env_context = None
-        self.task_description = None
+        self.env_context = PREDEFINED_ENV_CONTEXT  # 使用预定义的环境上下文
+        self.task_description = PREDEFINED_TASK_DESCRIPTION  # 使用预定义的任务描述
         self.current_generation = 0
         
-        print("\n✅ 智能体初始化完成！")
+        print("\n✅ 智能体初始化完成！(使用预定义环境上下文)")
         print("=" * 80)
     
     def _get_api_key(self) -> Optional[str]:
@@ -83,38 +79,46 @@ class RewardDesignAgent:
         
         return api_key
     
-    def initialize(self, env_file_path: str, task_description: str):
+    def initialize(self, env_file_path: str = None, task_description: str = None):
         """
-        初始化智能体：读取环境代码和任务描述
+        初始化智能体（使用预定义环境上下文，无需动态提取）
         
         Args:
-            env_file_path: 环境文件路径
-            task_description: 任务描述
+            env_file_path: 环境文件路径（可选，已使用预定义上下文）
+            task_description: 任务描述（可选，默认为 PREDEFINED_TASK_DESCRIPTION）
         """
         print("\n" + "=" * 80)
         print("初始化任务环境")
         print("=" * 80)
         
-        print(f"\n正在提取环境上下文: {env_file_path}")
-        self.env_context = self.context_extractor.extract_skeleton(env_file_path)
-        self.task_description = task_description
+        # 使用预定义的环境上下文
+        self.env_context = PREDEFINED_ENV_CONTEXT
+        
+        # 如果提供了自定义任务描述，则使用它
+        if task_description:
+            self.task_description = task_description
+        else:
+            self.task_description = PREDEFINED_TASK_DESCRIPTION
         
         # 打印关键信息
-        print(f"✅ 环境名称: {self.env_context.get('env_name', '未知')}")
-        print(f"✅ 观测空间: {self.env_context.get('observation_space', '未知')}")
-        print(f"✅ 动作空间: {self.env_context.get('action_space', '未知')}")
-        print(f"✅ 智能体数量: {self.env_context.get('agent_info', {})}")
+        print(f"✅ 环境名称: {self.env_context.get('env_name', 'simple_tag_env')}")
+        print(f"✅ 智能体数量: {self.env_context.get('agent_info', {})} 个")
+        print(f"✅ 物理常量: {self.env_context.get('physical_constants', {})}")
+        print(f"✅ 任务描述: {self.task_description[:100]}...")
         
-        # 估算Token消耗
-        context_text = self.context_extractor.format_for_llm(self.env_context)
-        token_estimate = self.context_extractor.estimate_token_count(context_text)
-        print(f"✅ 环境上下文Token估算: ~{token_estimate}")
+        # 打印Token估算
+        prompt = self.prompt_builder.initial_generation_prompt_with_predefined_context(
+            self.task_description,
+            self.env_context
+        )
+        token_estimate = len(prompt) // 4
+        print(f"✅ 提示词Token估算: ~{token_estimate}")
         
         print("=" * 80)
     
     def generate_candidates(self, generation: int) -> List[str]:
         """
-        生成候选奖励函数代码（增强错误处理）
+        生成候选奖励函数代码（使用预定义环境上下文）
         
         Args:
             generation: 当前代数
@@ -132,11 +136,11 @@ class RewardDesignAgent:
         for attempt in range(max_retries):
             try:
                 if generation == 0:
-                    # 第一代：Zero-Shot生成
+                    # 第一代：Zero-Shot生成（使用预定义上下文）
                     print(f"📝 使用Zero-Shot策略生成... (尝试 {attempt + 1}/{max_retries})")
-                    prompt = self.prompt_builder.initial_generation_prompt(
-                        self.env_context,
-                        self.task_description
+                    prompt = self.prompt_builder.initial_generation_prompt_with_predefined_context(
+                        self.task_description,
+                        self.env_context
                     )
                     
                     # 生成多个候选
@@ -153,23 +157,22 @@ class RewardDesignAgent:
                     codes = self._parse_code_blocks(raw_outputs)
                 
                 else:
-                    # 后续代：基于父本进化
+                    # 后续代：基于父本进化（使用预定义上下文）
                     print(f"🧬 使用进化策略生成... (尝试 {attempt + 1}/{max_retries})")
                     parent_code = self.memory.get_best_code(generation - 1)
                     reflection = self.memory.get_reflection(generation - 1)
 
-                    prompt = self.prompt_builder.evolution_prompt(
-                        self.env_context,
+                    prompt = self.prompt_builder.evolution_prompt_with_predefined_context(
                         self.task_description,
                         parent_code,
                         reflection,
-                        n_candidates=self.config['generation']['num_candidates']
+                        # n_candidates=self.config['generation']['num_candidates'],
+                        env_context=self.env_context
                     )
 
-                    # 后续代也生成多个回复（每个回复包含多个变体）
                     raw_outputs = self.llm.generate(
                         prompt=prompt,
-                        n=self.config['generation']['num_candidates'],  # 生成多个回复
+                        n=1,  
                         temperature=self.config['generation']['temperature'],
                         max_tokens=self.config['generation']['max_tokens'],
                         system_message=self.prompt_builder.SYSTEM_MESSAGE
@@ -539,35 +542,30 @@ def compute_reward(agent_name, observation, global_state, actions, world):
 # 测试代码
 # ========================================
 if __name__ == "__main__":
-    print("测试奖励函数设计智能体...")
+    print("测试奖励函数设计智能体（使用预定义环境上下文）...")
     
     # 注意：测试前需要设置API密钥环境变量
     # export OPENAI_API_KEY=your_key
     
     try:
-        # 1. 初始化智能体
+        # 1. 初始化智能体（自动使用预定义上下文）
         agent = RewardDesignAgent(config_path="llm_reward_agent/config/llm_config.yaml")
         
-        # 2. 初始化任务
+        # 2. 初始化任务（可选，如果不提供则使用预定义任务描述）
         agent.initialize(
-            env_file_path="MADDPG/envs/simple_tag_env.py",
-            task_description="""
-任务：3个追捕智能体协同围捕1个逃逸目标。
-
-要求：
-1. 追捕者需要接近并包围目标
-2. 追捕者之间避免碰撞
-3. 形成均匀的包围圈
-4. 在尽可能短的时间内完成围捕
-"""
+            env_file_path=None,  # 不再需要
+            task_description=None  # 可选，如果不提供则使用 PREDEFINED_TASK_DESCRIPTION
         )
+        
+        # 或者直接使用默认初始化（已在 __init__ 中完成）
+        # agent.initialize()
         
         # 3. 运行一代进化（使用模拟训练）
         print("\n" + "=" * 80)
         print("开始测试进化流程")
         print("=" * 80)
         
-        result = agent.step(generation=0)
+        result = agent.step(generation=0, use_real_training=False)  # 使用模拟训练
         
         print("\n" + "=" * 80)
         print("第0代进化完成")
@@ -576,7 +574,7 @@ if __name__ == "__main__":
         print(f"反思: {result['reflection'][:200]}...")
         
         # 4. 运行第二代（测试进化）
-        result = agent.step(generation=1)
+        result = agent.step(generation=1, use_real_training=False)
         
         print("\n" + "=" * 80)
         print("第1代进化完成")
@@ -595,5 +593,5 @@ if __name__ == "__main__":
         traceback.print_exc()
         print("\n提示：")
         print("1. 请确保已设置API密钥环境变量")
-        print("2. 请确保环境文件路径正确")
-        print("3. 如果不想调用真实LLM，可以修改代码使用Mock数据")
+        print("2. 如果不想调用真实LLM，可以使用 use_real_training=False")
+        print("3. 环境上下文已预定义在 prompt_templates.py 中")
