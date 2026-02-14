@@ -17,11 +17,11 @@ from openai import OpenAI, APIError, APITimeoutError
 class LLMInterface:
     """统一的LLM调用接口，支持多种模型"""
     
-    def __init__(self, 
+    def __init__(self,
                  provider: str = "openai",
-                 model_name: str = "generalv3", 
-                 api_key: Optional[str] = "rsOJPSwAJaAKvjEjDFuh:wDjdSiGbLkwWIoepTUii", 
-                 base_url: Optional[str] = "https://spark-api-open.xf-yun.com/v1",
+                 model_name: str = "gemini-3-pro-preview",
+                 api_key: Optional[str] = None,
+                 base_url: Optional[str] = "https://api.vectorengine.ai/v1",
                  timeout: int = 120,
                  max_retries: int = 3):
         """
@@ -100,6 +100,10 @@ class LLMInterface:
                     max_tokens=max_tokens,
                     timeout=self.timeout
                 )
+                # # 兼容性处理：如果返回的直接是字符串，说明API返回了纯文本
+                # if isinstance(response, str):
+                #     return response
+                # # ===================
                 return response.choices[0].message.content
             except Exception as err:
                 print(f"⚠️ 单线程调用失败: {err}")
@@ -200,7 +204,7 @@ if __name__ == "__main__":
         # 初始化接口
         llm = LLMInterface(
             provider="openai",
-            model_name="generalv3",  # 使用便宜的模型测试
+            model_name="gemini-3-pro-preview", 
             # api_key="your_key_here"  # 或者从环境变量读取
         )
         
@@ -221,7 +225,7 @@ if __name__ == "__main__":
         
         for i, result in enumerate(results):
             print(f"\n--- 结果 {i+1} ---")
-            print(result[:200])  # 只显示前200字符
+            print(result[:1000])  # 只显示前200字符
         
         # 测试分析
         print("\n=== 测试分析功能 ===")
@@ -232,7 +236,7 @@ if __name__ == "__main__":
             temperature=0.3
         )
         
-        print(f"\n分析结果:\n{analysis[:200]}")
+        print(f"\n分析结果:\n{analysis[:1000]}")
         
         # 估算成本
         print("\n=== 成本估算 ===")

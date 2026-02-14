@@ -69,14 +69,33 @@ class RewardDesignAgent:
         print("=" * 80)
     
     def _get_api_key(self) -> Optional[str]:
-        """获取API密钥（从环境变量或配置文件）"""
-        api_key = self.config['llm'].get('api_key')
-        
-        if api_key and api_key.startswith('${') and api_key.endswith('}'):
-            # 从环境变量读取
-            env_var = api_key[2:-1]  # 去掉 ${ 和 }
-            api_key = os.getenv(env_var)
-        
+        """获取API密钥（优先从环境变量读取）"""
+        provider = self.config['llm'].get('provider', 'openai')
+
+        # 首先尝试从环境变量读取
+        env_var_map = {
+            'openai': 'OPENAI_API_KEY',
+            'anthropic': 'ANTHROPIC_API_KEY',
+            'zhipu': 'ZHIPU_API_KEY',
+            'deepseek': 'DEEPSEEK_API_KEY',
+        }
+        env_var = env_var_map.get(provider.lower(), 'OPENAI_API_KEY')
+        api_key = os.getenv(env_var)
+
+        if api_key:
+            return api_key
+
+        # 其次尝试从配置文件读取（支持 ${ENV_VAR} 格式）
+        config_key = self.config['llm'].get('api_key')
+        if config_key:
+            if config_key.startswith('${') and config_key.endswith('}'):
+                # 从环境变量读取
+                env_var = config_key[2:-1]  # 去掉 ${ 和 }
+                api_key = os.getenv(env_var)
+            else:
+                # 直接使用配置文件中的key（不推荐，仅向后兼容）
+                api_key = config_key
+
         return api_key
     
     def initialize(self, env_file_path: str = None, task_description: str = None):
@@ -139,8 +158,8 @@ class RewardDesignAgent:
                     # 第一代：Zero-Shot生成（使用预定义上下文）
                     print(f"📝 使用Zero-Shot策略生成... (尝试 {attempt + 1}/{max_retries})")
                     prompt = self.prompt_builder.initial_generation_prompt_with_predefined_context(
-                        self.task_description,
-                        self.env_context
+                        # self.task_description,
+                        # self.env_context
                     )
                     
                     # 生成多个候选
@@ -163,11 +182,11 @@ class RewardDesignAgent:
                     reflection = self.memory.get_reflection(generation - 1)
 
                     prompt = self.prompt_builder.evolution_prompt_with_predefined_context(
-                        self.task_description,
+                        # self.task_description,
                         parent_code,
                         reflection,
                         # n_candidates=self.config['generation']['num_candidates'],
-                        env_context=self.env_context
+                        # env_context=self.env_context
                     )
 
                     raw_outputs = self.llm.generate(
@@ -240,33 +259,6 @@ class RewardDesignAgent:
             except:
                 pass
         
-        # 方案3: 使用最简单的代码
-        if len(fallback_codes) == 0:
-            simple_code = """
-import numpy as np
-
-def compute_reward(agent_name, observation, global_state, actions, world):
-    \"\"\"简单的后备奖励函数\"\"\"
-    components = {}
-    
-    if global_state.get('is_adversary', False):
-        # 追捕者：简单的距离奖励
-        agent_idx = int(agent_name.split('_')[1])
-        agent_pos = global_state['agent_positions'][agent_idx]
-        prey_pos = global_state['prey_position']
-        dist = np.linalg.norm(agent_pos - prey_pos)
-        components['distance_reward'] = -0.1 * dist
-    else:
-        # 逃跑者：简单的逃逸奖励
-        components['escape_reward'] = 0.1
-    
-    components['boundary_penalty'] = 0.0
-    
-    total_reward = sum(components.values())
-    return total_reward, components
-"""
-            fallback_codes.append(simple_code)
-            print("  📋 使用简单后备代码")
         
         return fallback_codes
     

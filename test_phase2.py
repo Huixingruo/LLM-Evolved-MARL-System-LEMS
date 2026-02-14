@@ -35,8 +35,8 @@ class TestLLMInterface(unittest.TestCase):
     
     def setUp(self):
         """测试前准备"""
-        # 检查API密钥
-        self.api_key = "rsOJPSwAJaAKvjEjDFuh:wDjdSiGbLkwWIoepTUii"
+        # 从环境变量获取API密钥
+        self.api_key = os.getenv("OPENAI_API_KEY")
         if not self.api_key:
             self.skipTest("未设置OPENAI_API_KEY环境变量，跳过LLM测试")
     
