@@ -138,32 +138,36 @@ class RewardDesignAgent:
     def generate_candidates(self, generation: int) -> List[str]:
         """
         生成候选奖励函数代码（使用预定义环境上下文）
-        
+
         Args:
             generation: 当前代数
-        
+
         Returns:
             List[str]: 候选代码列表
         """
         print(f"\n{'=' * 80}")
         print(f"🤖 第 {generation} 代: 生成候选奖励函数")
         print(f"{'=' * 80}")
-        
+
         max_retries = 3
         min_valid_codes = 2  # 至少需要2个有效候选
-        
+
+        # 获取配置中的生成数量
+        n_candidates = self.config['generation']['num_candidates']
+
         for attempt in range(max_retries):
             try:
+                raw_outputs = []
+
                 if generation == 0:
                     # 第一代：Zero-Shot生成（使用预定义上下文）
                     print(f"📝 使用Zero-Shot策略生成... (尝试 {attempt + 1}/{max_retries})")
                     prompt = self.prompt_builder.initial_generation_prompt_with_predefined_context(
-                        # self.task_description,
-                        # self.env_context
+                        self.task_description,
+                        self.env_context
                     )
-                    
-                    # 生成多个候选
-                    n_candidates = self.config['generation']['num_candidates']
+
+                    # 并行生成 n 个
                     raw_outputs = self.llm.generate(
                         prompt=prompt,
                         n=n_candidates,
@@ -171,39 +175,38 @@ class RewardDesignAgent:
                         max_tokens=self.config['generation']['max_tokens'],
                         system_message=self.prompt_builder.SYSTEM_MESSAGE
                     )
-                    
-                    # 解析代码
-                    codes = self._parse_code_blocks(raw_outputs)
-                
+
                 else:
                     # 后续代：基于父本进化（使用预定义上下文）
                     print(f"🧬 使用进化策略生成... (尝试 {attempt + 1}/{max_retries})")
                     parent_code = self.memory.get_best_code(generation - 1)
                     reflection = self.memory.get_reflection(generation - 1)
 
+                    # 调用新的 prompt 模板（不需要传 n_candidates）
                     prompt = self.prompt_builder.evolution_prompt_with_predefined_context(
-                        # self.task_description,
-                        parent_code,
-                        reflection,
-                        # n_candidates=self.config['generation']['num_candidates'],
-                        # env_context=self.env_context
+                        task_description=self.task_description,
+                        parent_code=parent_code,
+                        reflection=reflection,
+                        env_context=self.env_context  # 确保传入环境上下文
                     )
+
+                    # 关键修改：利用 LLM 的 temperature 采样特性
+                    # 请求 n=n_candidates 次独立生成，而不是让它一次写完
+                    # 提高 temperature 可以增加变体之间的差异性
+                    evolution_temp = min(1.0, self.config['generation']['temperature'] + 0.1)
 
                     raw_outputs = self.llm.generate(
                         prompt=prompt,
-                        n=1,  
-                        temperature=self.config['generation']['temperature'],
+                        n=n_candidates,  # 这里让 API 并行生成 N 份结果
+                        temperature=evolution_temp,
                         max_tokens=self.config['generation']['max_tokens'],
                         system_message=self.prompt_builder.SYSTEM_MESSAGE
                     )
 
-                    # 合并所有变体
-                    all_codes = []
-                    for raw_output in raw_outputs:
-                        variants = self._parse_variants(raw_output)
-                        all_codes.extend(variants)
-                    codes = all_codes
-                
+                # 统一解析逻辑：不再需要 _parse_variants
+                # 因为现在每个 output 应该就是一个完整的函数
+                codes = self._parse_code_blocks(raw_outputs)
+
                 # 语法检查和过滤
                 valid_codes = []
                 for i, code in enumerate(codes):
@@ -212,19 +215,21 @@ class RewardDesignAgent:
                         print(f"  ✅ 候选 {i}: 语法检查通过")
                     else:
                         print(f"  ❌ 候选 {i}: 语法错误，已跳过")
-                
+
                 # 检查是否有足够的有效代码
                 if len(valid_codes) >= min_valid_codes:
                     print(f"\n✅ 成功生成 {len(valid_codes)} 个有效候选")
                     return valid_codes
                 else:
                     print(f"\n⚠️ 有效代码不足（{len(valid_codes)}/{min_valid_codes}），重新生成...")
-            
+
             except Exception as e:
                 print(f"\n❌ 生成失败: {e}")
+                import traceback
+                traceback.print_exc()  # 打印详细错误堆栈方便调试
                 if attempt < max_retries - 1:
                     print(f"   重试中...")
-        
+
         # 所有尝试都失败，使用后备方案
         print("\n⚠️ 所有尝试都失败，使用后备方案...")
         return self._get_fallback_codes(generation)

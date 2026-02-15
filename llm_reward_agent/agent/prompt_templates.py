@@ -536,7 +536,7 @@ def compute_reward(agent_name, observation, global_state, actions, world):
 - 障碍物 (obstacles): {agent_info.get('num_obstacles', 0)} 个
 
 
-## 核心环境逻辑（渲染剥离后的代码）
+## 核心环境逻辑
 
 ```python
 {code_snippet}
@@ -631,39 +631,40 @@ def compute_reward(agent_name, observation, global_state, actions, world):
         task_description: str = PREDEFINED_TASK_DESCRIPTION,
         parent_code: str = "",
         reflection: str = "",
-        n_candidates: int = 4,
         env_context: Dict = None
     ) -> str:
         """
         进化生成提示词（使用预定义环境上下文）
-        
+
         Args:
             task_description: 任务描述（默认为 PREDEFINED_TASK_DESCRIPTION）
             parent_code: 上一代最优代码
             reflection: 上一代的训练反思
-            n_candidates: 需要生成的候选数量
             env_context: 环境上下文（默认为 PREDEFINED_ENV_CONTEXT）
-        
+
         Returns:
             str: 完整提示词
         """
         if env_context is None:
             env_context = PREDEFINED_ENV_CONTEXT
-        
+
+        # 获取环境代码片段
+        code_snippet = env_context.get('code_snippet', '')
         agent_info = env_context.get('agent_info', {})
-        obs_spaces = env_context.get('runtime_spaces', {}).get('observation_spaces', {})
-        act_spaces = env_context.get('runtime_spaces', {}).get('action_spaces', {})
-        
+
         prompt = f"""你是一位专业的强化学习奖励工程师。基于上一代的训练反馈，改进奖励函数。
 
 # 任务描述
 {task_description}
 
-# 环境配置（简要）
-- 追捕者: {agent_info.get('num_adversaries', 3)} 个
-- 逃跑者: {agent_info.get('num_good', 1)} 个
-- 动作空间: {list(act_spaces.values())[0] if act_spaces else 'Box(2,)'}
-- 观测空间: {list(obs_spaces.values())[0] if obs_spaces else 'Box(12,)'}
+# 环境配置
+
+## 核心环境逻辑
+请严格遵守以下环境定义中的变量名称：
+
+```python
+{code_snippet}
+```
 
 # 上一代最优代码
 
@@ -677,74 +678,29 @@ def compute_reward(agent_name, observation, global_state, actions, world):
 
 # 改进要求
 
-基于上述反思，对代码进行修改，生成 **{n_candidates} 个不同的变体（Mutation）**。
+基于上述反思，请生成 1 个 改进后的奖励函数代码。
 
-每个变体应该：
-1. 基于上一代代码进行改进
-2. 针对反思中提到的问题进行调整：
-   - 调整权重系数（增大/减小某些分量的权重）
-   - 增加/删除奖励项
-   - 改变函数形式（线性 → 指数 / 分段函数 / 势场函数等）
-3. 每个变体应有明显差异（不要只是微调权重）
-4. 保持代码的可读性和可解释性
-
-## 变体生成策略建议
-
-- **变体0**: 保守改进（微调权重，保持结构）
-- **变体1**: 激进改进（大幅调整权重或函数形式）
-- **变体2**: 添加新的奖励分量
-- **变体3**: 简化奖励函数（删除不重要的分量）
+要求：
+1. 针对性优化：直接解决反思中提到的问题（如权重不合理、缺少某项奖励）。
+2. 正确性：确保使用的变量在 global_state 或 observation 中真实存在。
+3. 探索性：你可以调整权重、修改计算公式或增加新的奖励项。
 
 # 输出格式
 
-输出 {n_candidates} 个完整的Python代码块，每个代码块之间用注释 `# === VARIANT {{i}} ===` 分隔。
-
-示例：
+只输出 1 个 完整的 Python 函数代码，不要包含任何 Markdown 标记（如 ```python），也不要包含任何解释文字。
 
 ```python
-# === VARIANT 0 ===
 import numpy as np
 
 def compute_reward(agent_name, observation, global_state, actions, world):
     components = {{}}
-    # ... 变体0的实现 ...
-    total_reward = sum(components.values())
-    return total_reward, components
-
-# === VARIANT 1 ===
-import numpy as np
-
-def compute_reward(agent_name, observation, global_state, actions, world):
-    components = {{}}
-    # ... 变体1的实现 ...
-    total_reward = sum(components.values())
-    return total_reward, components
-
-# === VARIANT 2 ===
-import numpy as np
-
-def compute_reward(agent_name, observation, global_state, actions, world):
-    components = {{}}
-    # ... 变体2的实现 ...
-    total_reward = sum(components.values())
-    return total_reward, components
-
-# === VARIANT 3 ===
-import numpy as np
-
-def compute_reward(agent_name, observation, global_state, actions, world):
-    components = {{}}
-    # ... 变体3的实现 ...
+    # 你的代码实现
+    # ...
     total_reward = sum(components.values())
     return total_reward, components
 ```
-
-**注意**：
-1. 只输出代码，不要有任何额外解释
-2. 每个变体必须是完整的、可独立运行的函数
-3. 确保代码语法正确，符合PEP8规范
 """
-        
+
         return prompt
 
 
