@@ -145,7 +145,50 @@ class LogAnalyzer:
             'total_episodes': 0
         }
         
-        # 提取episode统计
+        # 处理日志数据为数组的情况（当前实际格式）
+        # 格式: [{"成功围捕次数": 56, "成功围捕率": "1.12%", "平均回合步数": "99.5", ...}]
+        if isinstance(log_data, list) and len(log_data) > 0:
+            # 取第一个元素（包含训练统计信息）
+            log_entry = log_data[0]
+            
+            # 提取总回合数
+            if '总回合数' in log_entry:
+                performance['total_episodes'] = log_entry['总回合数']
+            
+            # 提取成功率 - 尝试多种方式
+            if '成功围捕率' in log_entry:
+                success_rate_str = log_entry['成功围捕率']
+                if isinstance(success_rate_str, str):
+                    # 格式: "1.12%" -> 0.0112
+                    success_rate_str = success_rate_str.replace('%', '').strip()
+                    try:
+                        performance['success_rate'] = float(success_rate_str) / 100.0
+                    except ValueError:
+                        pass
+                elif isinstance(success_rate_str, (int, float)):
+                    performance['success_rate'] = float(success_rate_str)
+            
+            # 如果没有成功围捕率，尝试用成功围捕次数计算
+            if performance['success_rate'] == 0.0 and '成功围捕次数' in log_entry and '总回合数' in log_entry:
+                captures = log_entry['成功围捕次数']
+                total = log_entry['总回合数']
+                if total > 0:
+                    performance['success_rate'] = captures / total
+            
+            # 提取平均捕获时间
+            if '平均回合步数' in log_entry:
+                avg_steps = log_entry['平均回合步数']
+                if isinstance(avg_steps, str):
+                    try:
+                        performance['avg_capture_time'] = float(avg_steps)
+                    except ValueError:
+                        pass
+                elif isinstance(avg_steps, (int, float)):
+                    performance['avg_capture_time'] = float(avg_steps)
+            
+            return performance
+        
+        # 提取episode统计（旧格式）
         if 'episodes' in log_data:
             episodes = log_data['episodes']
             performance['total_episodes'] = len(episodes)
