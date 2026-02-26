@@ -6,6 +6,7 @@ Author: LEMS Project
 Date: 2026-02-03
 Version: 1.0
 """
+# python -m llm_reward_agent.agent.reward_design_agent
 
 import os
 import re
@@ -179,8 +180,36 @@ class RewardDesignAgent:
                 else:
                     # 后续代：基于父本进化（使用预定义上下文）
                     print(f"🧬 使用进化策略生成... (尝试 {attempt + 1}/{max_retries})")
-                    parent_code = self.memory.get_best_code(generation - 1)
-                    reflection = self.memory.get_reflection(generation - 1)
+                    
+                    # 获取父代代码和反思，如果失败则回退到Zero-Shot
+                    try:
+                        parent_code = self.memory.get_best_code(generation - 1)
+                        reflection = self.memory.get_reflection(generation - 1)
+                    except (ValueError, IndexError) as e:
+                        print(f"⚠️ 无法获取第{generation-1}代数据: {e}")
+                        print("   回退到Zero-Shot策略生成...")
+                        # 回退到Zero-Shot
+                        prompt = self.prompt_builder.initial_generation_prompt_with_predefined_context(
+                            self.task_description,
+                            self.env_context
+                        )
+                        raw_outputs = self.llm.generate(
+                            prompt=prompt,
+                            n=n_candidates,
+                            temperature=self.config['generation']['temperature'],
+                            max_tokens=self.config['generation']['max_tokens'],
+                            system_message=self.prompt_builder.SYSTEM_MESSAGE
+                        )
+                        codes = self._parse_code_blocks(raw_outputs)
+                        valid_codes = []
+                        for i, code in enumerate(codes):
+                            if self._syntax_check(code):
+                                valid_codes.append(code)
+                        if len(valid_codes) >= min_valid_codes:
+                            return valid_codes[:n_candidates]
+                        else:
+                            print(f"⚠️ 生成候选不足，继续重试...")
+                            continue
 
                     # 调用新的 prompt 模板（不需要传 n_candidates）
                     prompt = self.prompt_builder.evolution_prompt_with_predefined_context(
@@ -309,21 +338,79 @@ class RewardDesignAgent:
         print(f"✅ 最优候选: {best_result['id']}")
         print(f"   Fitness: {best_result['fitness']:.4f}")
         
-        # 2. 构建日志摘要
-        logs_summary = self._format_logs(valid_results)
-        
-        # 3. 调用LLM生成Reflection
+        # 2. 构建日志摘要（只包含最优候选的日志，因为只提供给LLM最优代码）
+        logs_summary = self._format_logs([best_result])
+
+        # 3. 调用LLM生成Reflection（带重试机制）
         print("\n🤔 LLM正在生成反思...")
         prompt = self.prompt_builder.reflection_prompt(logs_summary)
-        reflection = self.llm.analyze(
-            prompt=prompt,
-            temperature=self.config['reflection']['temperature'],
-            max_tokens=self.config['reflection']['max_tokens']
-        )
-        
+
+        max_retries = 3
+        reflection = None
+        last_error = None
+
+        for attempt in range(max_retries):
+            try:
+                print(f"   尝试 {attempt + 1}/{max_retries}...")
+                reflection = self.llm.analyze(
+                    prompt=prompt,
+                    temperature=self.config['reflection']['temperature'],
+                    max_tokens=self.config['reflection']['max_tokens']
+                )
+
+                # 检查返回是否有效
+                if reflection and reflection.strip():
+                    print(f"   ✅ 反思生成成功")
+                    break
+                else:
+                    print(f"   ⚠️ 返回为空，继续重试...")
+                    reflection = None
+
+            except Exception as e:
+                last_error = e
+                print(f"   ❌ 第 {attempt + 1} 次失败: {e}")
+
+        # 4. 如果重试全部失败，保存提示词到文件
+        if not reflection or not reflection.strip():
+            print(f"\n❌ 反思生成全部失败（{max_retries}次）")
+            print("   正在保存提示词到文件...")
+
+            # 生成文件名（包含时间戳和代数）
+            import datetime
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_filename = f"failed_reflection_prompt_g{self.current_generation}_{timestamp}.txt"
+            save_path = os.path.join(self.config['logging']['save_dir'], save_filename)
+
+            # 确保目录存在
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+            # 保存提示词内容
+            with open(save_path, 'w', encoding='utf-8') as f:
+                f.write("=" * 80 + "\n")
+                f.write(f"反思生成失败 - 第 {self.current_generation} 代\n")
+                f.write(f"时间: {datetime.datetime.now().isoformat()}\n")
+                f.write(f"重试次数: {max_retries}\n")
+                f.write(f"最后错误: {last_error}\n")
+                f.write("=" * 80 + "\n\n")
+                f.write("【发送给LLM的完整提示词】\n")
+                f.write("=" * 80 + "\n")
+                f.write(prompt)
+                f.write("\n\n【训练结果摘要】\n")
+                f.write("=" * 80 + "\n")
+                f.write(logs_summary)
+
+            print(f"   ✅ 已保存到: {save_path}")
+
+            # 不再使用默认反思，而是抛出异常向上传递
+            raise RuntimeError(
+                f"反思生成失败（已重试{max_retries}次）\n"
+                f"最后错误: {last_error}\n"
+                f"提示词已保存到: {save_path}"
+            )
+
         print(f"\n📊 反思内容（前200字符）:")
         print(reflection[:200] + "..." if len(reflection) > 200 else reflection)
-        
+
         return best_result['code'], reflection
     
     def step(self, generation: int, use_real_training: bool = True) -> Dict:
@@ -357,8 +444,9 @@ class RewardDesignAgent:
             simulator = SimulationTool(
                 base_dir=self.config['logging']['save_dir'],
                 max_workers=training_config.get('parallel_workers', 4),
-                timeout=training_config.get('timeout', 1200),
-                episode_num=training_config.get('episode_num', 100)
+                timeout=training_config.get('timeout', 10800),
+                episode_num=training_config.get('episode_num', 100),
+                use_gpu=training_config.get('use_gpu', True)
             )
             
             results = simulator.run_parallel(codes, generation)
