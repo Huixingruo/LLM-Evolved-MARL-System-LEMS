@@ -19,7 +19,7 @@ class LLMInterface:
     
     def __init__(self,
                  provider: str = "openai",
-                 model_name: str = "gemini-3-pro-preview",
+                 model_name: str = "gpt-5.1",
                  api_key: Optional[str] = None,
                  base_url: Optional[str] = "https://api.vectorengine.ai/v1",
                  timeout: int = 120,
@@ -106,7 +106,9 @@ class LLMInterface:
                 # # ===================
                 return response.choices[0].message.content
             except Exception as err:
-                print(f"⚠️ 单线程调用失败: {err}")
+                print(f"⚠️ LLM API调用失败: {err}")
+                import traceback
+                traceback.print_exc()
                 return None
 
         # =========================================================
@@ -160,6 +162,14 @@ class LLMInterface:
             max_tokens=max_tokens,
             system_message=system_message
         )
+
+        # 如果返回空列表，抛出异常让上层处理
+        if not results:
+            raise RuntimeError(
+                f"LLM analyze调用失败: generate返回空列表\n"
+                f"Prompt长度: {len(prompt)} chars"
+            )
+
         return results[0]
     
     def estimate_cost(self, 
@@ -204,7 +214,7 @@ if __name__ == "__main__":
         # 初始化接口
         llm = LLMInterface(
             provider="openai",
-            model_name="gemini-3-pro-preview", 
+            model_name="gpt-5.1", 
             # api_key="your_key_here"  # 或者从环境变量读取
         )
         
@@ -218,7 +228,7 @@ if __name__ == "__main__":
         
         results = llm.generate(
             prompt=prompt,
-            n=2,
+            n=1,
             temperature=0.7,
             max_tokens=200
         )
@@ -227,23 +237,23 @@ if __name__ == "__main__":
             print(f"\n--- 结果 {i+1} ---")
             print(result[:1000])  # 只显示前200字符
         
-        # 测试分析
-        print("\n=== 测试分析功能 ===")
-        analysis_prompt = "分析以下代码的时间复杂度: def foo(n): return sum(range(n))"
+        # # 测试分析
+        # print("\n=== 测试分析功能 ===")
+        # analysis_prompt = "分析以下代码的时间复杂度: def foo(n): return sum(range(n))"
         
-        analysis = llm.analyze(
-            prompt=analysis_prompt,
-            temperature=0.3
-        )
+        # analysis = llm.analyze(
+        #     prompt=analysis_prompt,
+        #     temperature=0.3
+        # )
         
-        print(f"\n分析结果:\n{analysis[:1000]}")
+        # print(f"\n分析结果:\n{analysis[:1000]}")
         
-        # 估算成本
-        print("\n=== 成本估算 ===")
-        cost = llm.estimate_cost(input_tokens=500, output_tokens=1000)
-        print(f"估算成本: ${cost:.6f}")
+        # # 估算成本
+        # print("\n=== 成本估算 ===")
+        # cost = llm.estimate_cost(input_tokens=500, output_tokens=1000)
+        # print(f"估算成本: ${cost:.6f}")
         
-        print("\n✅ LLM接口测试完成！")
+        # print("\n✅ LLM接口测试完成！")
     
     except Exception as e:
         print(f"\n❌ 测试失败: {e}")
