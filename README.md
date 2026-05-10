@@ -6,7 +6,7 @@
 
 [![Python Version](https://img.shields.io/badge/python-3.11.8-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-80%25%20complete-yellow.svg)]()
+[![Status](https://img.shields.io/badge/status-90%25%20complete-brightgreen.svg)]()
 
 ---
 
@@ -60,7 +60,23 @@ python run_evolution.py --num_generations 10 --episode_num 200
 python run_evolution.py --resume --archive_dir experiments/evolution_archive --num_generations 5
 ```
 
-### 3. 查看结果
+### 3. 运行消融实验
+
+```bash
+# 查看可用变体
+python ablation_study.py --list-variants
+
+# 运行完整消融实验
+python ablation_study.py --num_generations 5 --episode_num 100
+
+# 只运行特定变体
+python ablation_study.py --variants full no_air no_dream --num_generations 3
+
+# 使用模拟训练快速测试
+python ablation_study.py --num_generations 3 --no-real-training
+```
+
+### 4. 查看结果
 
 ```bash
 # 生成可视化图表
@@ -77,13 +93,13 @@ cat experiments/evolution_run/reward_function_best.py
 ### 整体进度
 
 ```
-[████████████████░░░░] 80% 完成
+[██████████████████░░] 90% 完成
 
 阶段一: 环境接口标准化     ✅ 已完成 (2026-02-02)
 阶段二: LLM Agent开发       ✅ 已完成 (2026-02-03)
 阶段三: 并行训练框架       ✅ 已完成 (2026-02-03)
 阶段四: 反馈闭环与整合     ✅ 已完成 (2026-02-03)
-阶段五: 实验与论文         ⏳ 待开始
+阶段五: 消融实验与论文      🔄 进行中 (2026-05-10)
 ```
 
 ### 代码统计
@@ -133,6 +149,7 @@ cat experiments/evolution_run/reward_function_best.py
 
 ```
 LEMS/
+├── CLAUDE.md                    # Claude Code 项目配置
 ├── MADDPG/                      # 原MADDPG项目
 │   ├── agents/                  # 智能体实现
 │   ├── envs/
@@ -160,18 +177,24 @@ LEMS/
 ├── visualization/               # ✅ 可视化工具
 │   └── evolution_plot.py
 │
-├── run_evolution.py            # ✅ 主流程脚本
-├── launcher.py                 # ✅ 并行调度器
+├── docs/                        # ✅ 项目文档
+│   ├── ABLATION_STUDY.md        # 消融实验文档
+│   └── ...
 │
-├── test_phase1.py              # 测试脚本
-├── test_phase2.py
-├── test_phase3.py
-├── test_phase4.py
+├── tests/                       # ✅ 测试套件
+│   ├── agent/                   # Agent模块测试
+│   ├── tools/                   # 工具模块测试
+│   └── run_all_tests.py         # 测试运行器
+│
+├── run_evolution.py            # ✅ 主流程脚本
+├── ablation_study.py           # ✅ 消融实验脚本
+├── launcher.py                 # ✅ 并行调度器
 │
 └── experiments/                # 实验结果（运行时生成）
     ├── evolution_archive/      # 进化记录
+    ├── evolution_run/          # 最新进化结果
     ├── generation_XXX/         # 训练沙盒
-    └── plots/                  # 可视化图表
+    └── ablation_study/         # 消融实验结果
 ```
 
 ---
@@ -207,7 +230,18 @@ best_code, reflection = agent.analyze_results(results)
 result = agent.step(generation=1)
 ```
 
-### 4. 丰富可视化
+### 4. 消融实验分析
+
+```python
+# 运行消融实验验证各模块贡献
+study = AblationStudy(config_path="llm_config.yaml")
+results = study.run_full_study(num_generations=5, episode_num=100)
+
+# 支持的变体：no_air, no_dream, no_convergence_filter, 
+#            no_degradation_selection, single_fitness 等
+```
+
+### 5. 丰富可视化
 
 ```python
 # 绘制进化曲线、Fitness分布等
@@ -250,20 +284,12 @@ plotter.generate_all_plots(output_dir="plots")
 ### 运行测试
 
 ```bash
-# 阶段一测试
-python test_phase1.py
+# 运行完整测试套件
+python tests/run_all_tests.py
 
-# 阶段二测试（需要API密钥）
-python test_phase2.py
-
-# 阶段三测试
-python test_phase3.py
-
-# 阶段四测试
-python test_phase4.py
-
-# 快速测试（所有阶段）
-python quick_test_phase4.py
+# 运行特定模块测试
+python tests/agent/test_reward_design_agent.py
+python tests/tools/test_simulation_tool.py
 ```
 
 ### 测试覆盖率
@@ -276,18 +302,18 @@ python quick_test_phase4.py
 
 ## 📚 文档
 
-### 开发文档
+### 核心文档
 
-- [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) - 详细实施计划（1878行）
-- [PHASE1_DOCUMENTATION.md](PHASE1_DOCUMENTATION.md) - 阶段一开发文档
-- [PHASE2_DOCUMENTATION.md](PHASE2_DOCUMENTATION.md) - 阶段二开发文档
-- [PHASE3_DOCUMENTATION.md](PHASE3_DOCUMENTATION.md) - 阶段三开发文档
-- [PHASE4_DOCUMENTATION.md](PHASE4_DOCUMENTATION.md) - 阶段四开发文档
-
-### 快速指南
-
-- [PHASE4_QUICK_START.md](PHASE4_QUICK_START.md) - 快速开始指南
+- [CLAUDE.md](CLAUDE.md) - Claude Code 项目配置
+- [docs/ABLATION_STUDY.md](docs/ABLATION_STUDY.md) - 消融实验详细文档
 - [llm_reward_agent/README.md](llm_reward_agent/README.md) - LLM Agent模块说明
+
+### 技术文档
+
+- [docs/COT_TWO_STAGE_PIPELINE.md](docs/COT_TWO_STAGE_PIPELINE.md) - CoT两阶段管线设计
+- [docs/CONVERGENCE_FILTER_INTERCEPTOR.md](docs/CONVERGENCE_FILTER_INTERCEPTOR.md) - 收敛过滤拦截器
+- [docs/evoLeap_mutate_operator.md](docs/evoLeap_mutate_operator.md) - 进化变异算子
+- [docs/REFACTORED_MODULES.md](docs/REFACTORED_MODULES.md) - 重构模块说明
 
 ---
 
@@ -321,13 +347,14 @@ python quick_test_phase4.py
 
 ## 📈 路线图
 
-- [x] **阶段一**: 环境接口标准化（1-2周）
-- [x] **阶段二**: LLM Agent核心开发（2-3周）
-- [x] **阶段三**: 并行训练框架（1-2周）
-- [x] **阶段四**: 反馈闭环与整合（1周）
-- [ ] **阶段五**: 实验与论文（2-3周）
+- [x] **阶段一**: 环境接口标准化（2026-02-02）
+- [x] **阶段二**: LLM Agent核心开发（2026-02-03）
+- [x] **阶段三**: 并行训练框架（2026-02-03）
+- [x] **阶段四**: 反馈闭环与整合（2026-02-03）
+- [x] **阶段五**: 消融实验脚本（2026-05-10）
+- [ ] **阶段六**: 完整实验与论文（进行中）
 
-**当前进度**: 80% 完成（4/5阶段）
+**当前进度**: 90% 完成（5/6阶段）
 
 ---
 
@@ -366,6 +393,6 @@ MIT License
 
 ---
 
-**最后更新**: 2026-02-03  
-**版本**: v0.8  
+**最后更新**: 2026-05-10
+**版本**: v0.9
 **状态**: 🟢 开发中
