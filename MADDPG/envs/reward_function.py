@@ -1,51 +1,12 @@
 """
 可插拔的奖励函数模块 - 追捕者奖励函数
 LLM将生成并替换此模块中的compute_reward函数
-
-奖励设计说明：
-- 此模块仅包含追捕者(adversary)的奖励函数
-- 逃跑者(agent)的奖励函数在 simple_tag_env.py 的 Scenario 类中实现（固定不变）
-- LLM只需设计追捕者的奖励函数
-
-Author: LEMS Project
-Date: 2026-02-12
-Version: 2.0 (Adversary Only)
 """
 
 import numpy as np
 
 
 def compute_reward(agent_name, observation, global_state, actions, world):
-    """
-    可插拔的奖励函数接口（追捕者专用）
-
-    注意：此函数仅用于追捕者。
-    逃跑者的奖励函数在 simple_tag_env.py 中实现。
-
-    Args:
-        agent_name (str): 当前智能体名称 (e.g., "adversary_0")
-        observation (np.ndarray): 当前智能体的观测向量（未使用）
-        global_state (dict): 全局状态信息
-            {
-                'agent_positions': np.ndarray,       # shape: (n_agents, 2)
-                'agent_velocities': np.ndarray,      # shape: (n_agents, 2)
-                'prey_position': np.ndarray,         # shape: (2,)
-                'prey_velocity': np.ndarray,         # shape: (2,)
-                'distances_to_prey': np.ndarray,     # shape: (n_adversaries,)
-                'inter_agent_distances': np.ndarray, # shape: (n_agents, n_agents)
-                'is_adversary': bool,                # True
-                'adversary_indices': list,           # 追捕者索引
-                'prey_indices': list,                # 逃跑者索引
-                'world_size': float,                 # 世界大小
-                'capture_threshold': float,          # 围捕阈值
-            }
-        actions (dict): 所有智能体的动作 {agent_name: action_vector}
-        world (World): PettingZoo的World对象
-
-    Returns:
-        reward (float): 标量奖励值
-        components (dict): 奖励分量字典（用于日志分析）
-    """
     components = {}
     reward = _adversary_reward(agent_name, global_state, components)
     return reward, components
@@ -217,96 +178,3 @@ def _calculate_bound_penalty(x, world_size):
         return (x - boundary_start) * 10
     return min(np.exp(2 * x - 2 * full_boundary), 10)
 
-
-def get_baseline_version():
-    """
-    返回基准版本信息
-
-    Returns:
-        dict: 版本信息字典
-    """
-    return {
-        'version': '2.0',
-        'type': 'adversary_reward_only',
-        'date': '2026-02-12',
-        'description': '追捕者奖励函数（逃跑者奖励在环境中实现）',
-        'note': '此模块仅包含追捕者奖励，逃跑者奖励在 simple_tag_env.py 中',
-        'features': {
-            'adversary': [
-                '弹性环势场（增强进圈诱导）',
-                '动态角度排斥（温和版，避免过度排斥）',
-                '物理避撞',
-                '全局协作奖励（围捕成功+角度均匀性）',
-                '边界惩罚'
-            ]
-        },
-        'tuning_notes': [
-            '降低排斥力权重(5.0→2.0)，避免队友相互驱散',
-            '增加远距离吸引力(2.0→3.0)，防止在圈外徘徊'
-        ]
-    }
-
-
-# ========================================
-# 测试代码
-# ========================================
-if __name__ == "__main__":
-    print("=" * 60)
-    print("测试奖励函数模块（追捕者专用 V3.1）")
-    print("=" * 60)
-
-    # 构造测试数据
-    test_global_state = {
-        'agent_positions': np.array([[0.5, 0.5], [0.3, 0.7], [-0.2, 0.4], [0.0, 0.0]]),
-        'agent_velocities': np.array([[0.1, 0.0], [0.0, 0.1], [0.05, 0.05], [-0.1, 0.1]]),
-        'prey_position': np.array([0.0, 0.0]),
-        'prey_velocity': np.array([-0.1, 0.1]),
-        'distances_to_prey': np.array([0.707, 0.806, 0.447]),
-        'inter_agent_distances': np.array([
-            [0.0, 0.283, 0.778, 0.707],
-            [0.283, 0.0, 0.583, 0.806],
-            [0.778, 0.583, 0.0, 0.447],
-            [0.707, 0.806, 0.447, 0.0]
-        ]),
-        'is_adversary': True,
-        'adversary_indices': [0, 1, 2],
-        'prey_indices': [3],
-        'world_size': 2.5,
-        'capture_threshold': 0.5
-    }
-
-    test_actions = {
-        'adversary_0': np.array([0.5, 0.3]),
-        'adversary_1': np.array([0.2, 0.6]),
-        'adversary_2': np.array([0.1, 0.1]),
-        'agent_0': np.array([-0.8, 0.5])
-    }
-
-    # 测试追捕者奖励
-    print("\n=== 测试追捕者奖励 ===")
-    reward, components = compute_reward(
-        'adversary_0',
-        None,
-        test_global_state,
-        test_actions,
-        None
-    )
-    print(f"总奖励: {reward:.4f}")
-    print("奖励分量:")
-    for key, val in components.items():
-        print(f"  {key}: {val:.4f}")
-
-    # 打印版本信息
-    print("\n=== 版本信息 ===")
-    version_info = get_baseline_version()
-    print(f"版本: {version_info['version']}")
-    print(f"类型: {version_info['type']}")
-    print(f"描述: {version_info['description']}")
-    print(f"注意: {version_info['note']}")
-    print("\n追捕者特性:")
-    for feature in version_info['features']['adversary']:
-        print(f"  - {feature}")
-
-    print("\n" + "=" * 60)
-    print("✅ 奖励函数模块测试完成！")
-    print("=" * 60)

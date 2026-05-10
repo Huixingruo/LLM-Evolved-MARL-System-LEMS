@@ -25,7 +25,8 @@ class SimulationTool:
                  base_dir: str = "experiments",
                  max_workers: int = 4,
                  timeout: int = 1200,
-                 episode_num: int = 100):
+                 episode_num: int = 100,
+                 use_gpu: bool = True):
         """
         初始化仿真工具
         
@@ -34,6 +35,7 @@ class SimulationTool:
             max_workers: 最大并行数
             timeout: 训练超时时间（秒）
             episode_num: 训练回合数
+            use_gpu: 是否使用GPU训练
         """
         print(f"\n{'='*80}")
         print("初始化仿真工具")
@@ -43,7 +45,8 @@ class SimulationTool:
         self.launcher = ParallelLauncher(
             max_workers=max_workers,
             timeout=timeout,
-            episode_num=episode_num
+            episode_num=episode_num,
+            use_gpu=use_gpu
         )
         
         print(f"{'='*80}\n")
@@ -178,108 +181,3 @@ class SimulationTool:
     def cleanup_all(self):
         """清理所有沙盒"""
         self.sandbox_mgr.cleanup_all()
-
-
-# ========================================
-# 测试代码
-# ========================================
-if __name__ == "__main__":
-    print("测试仿真工具集成...")
-    
-    # 准备测试代码
-    test_codes = [
-        """
-import numpy as np
-
-def compute_reward(agent_name, observation, global_state, actions, world):
-    \"\"\"候选0: 基础距离奖励\"\"\"
-    components = {}
-    
-    if global_state.get('is_adversary', False):
-        # 追捕者：接近猎物
-        agent_idx = int(agent_name.split('_')[1])
-        agent_pos = global_state['agent_positions'][agent_idx]
-        prey_pos = global_state['prey_position']
-        dist = np.linalg.norm(agent_pos - prey_pos)
-        
-        components['distance_reward'] = -0.1 * dist
-        components['boundary_penalty'] = 0.0
-    else:
-        # 逃跑者：远离追捕者
-        components['escape_reward'] = 0.1
-        components['boundary_penalty'] = 0.0
-    
-    total_reward = sum(components.values())
-    return total_reward, components
-""",
-        """
-import numpy as np
-
-def compute_reward(agent_name, observation, global_state, actions, world):
-    \"\"\"候选1: 增强距离奖励\"\"\"
-    components = {}
-    
-    if global_state.get('is_adversary', False):
-        agent_idx = int(agent_name.split('_')[1])
-        agent_pos = global_state['agent_positions'][agent_idx]
-        prey_pos = global_state['prey_position']
-        dist = np.linalg.norm(agent_pos - prey_pos)
-        
-        # 更强的距离奖励
-        components['distance_reward'] = -0.2 * dist
-        components['boundary_penalty'] = 0.0
-    else:
-        components['escape_reward'] = 0.1
-        components['boundary_penalty'] = 0.0
-    
-    total_reward = sum(components.values())
-    return total_reward, components
-"""
-    ]
-    
-    # 创建仿真工具
-    sim_tool = SimulationTool(
-        base_dir="test_logs/simulation_test",
-        max_workers=2,
-        timeout=300,
-        episode_num=10  # 快速测试：只训练10回合
-    )
-    
-    print("\n⚠️ 警告：这将实际运行训练，可能需要几分钟...")
-    choice = input("是否继续？(y/n): ").strip().lower()
-    
-    if choice == 'y':
-        # 运行并行训练
-        results = sim_tool.run_parallel(codes=test_codes, generation=0)
-        
-        # 打印详细结果
-        print("\n" + "="*80)
-        print("详细结果")
-        print("="*80)
-        
-        for result in results:
-            print(f"\n{result['id']}:")
-            print(f"  状态: {result['status']}")
-            print(f"  Fitness: {result.get('fitness', 0):.4f}")
-            
-            if result['status'] == 'success':
-                metrics = result['metrics']
-                print(f"  成功率: {metrics.get('success_rate', 0):.2%}")
-                print(f"  捕获时间: {metrics.get('avg_capture_time', 0):.1f} steps")
-                
-                # 奖励分量
-                if metrics.get('reward_components'):
-                    print(f"  奖励分量:")
-                    for comp, val in metrics['reward_components'].items():
-                        if isinstance(val, dict):
-                            print(f"    - {comp}: {val.get('mean', 0):.4f}")
-                        else:
-                            print(f"    - {comp}: {val:.4f}")
-        
-        # 清理
-        print("\n清理测试文件...")
-        sim_tool.cleanup_all()
-    else:
-        print("跳过实际训练测试")
-    
-    print("\n✅ 仿真工具集成测试完成！")

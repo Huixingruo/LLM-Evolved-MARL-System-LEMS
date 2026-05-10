@@ -100,11 +100,16 @@ class LLMInterface:
                     max_tokens=max_tokens,
                     timeout=self.timeout
                 )
-                # # 兼容性处理：如果返回的直接是字符串，说明API返回了纯文本
-                # if isinstance(response, str):
-                #     return response
-                # # ===================
-                return response.choices[0].message.content
+
+                content = response.choices[0].message.content
+
+                # 探针：拦截API假装成功(HTTP 200)但内容被置空的静默失败
+                if not content:
+                    print(f"\n🚨 异常探针触发：API请求成功(HTTP 200)，但返回内容被置空！")
+                    print(f"   Finish Reason: {response.choices[0].finish_reason}")
+                    print(f"   完整响应体: {response}")
+
+                return content
             except Exception as err:
                 print(f"⚠️ LLM API调用失败: {err}")
                 import traceback
@@ -116,7 +121,8 @@ class LLMInterface:
         # =========================================================
         if n == 1:
             res = _single_call()
-            return [res] if res else []
+            # 严格判断 None：空字符串 "" 由上层判断业务逻辑，不在此处丢弃
+            return [res] if res is not None else []
 
         # =========================================================
         # 策略 B: 如果 n > 1，使用多线程并发 (兼容性最强)
@@ -132,7 +138,7 @@ class LLMInterface:
             # 获取结果
             for future in concurrent.futures.as_completed(futures):
                 res = future.result()
-                if res:
+                if res is not None:
                     results.append(res)
         
         print(f"✅ LLM生成成功: 获取到 {len(results)}/{n} 个回复")
@@ -170,7 +176,15 @@ class LLMInterface:
                 f"Prompt长度: {len(prompt)} chars"
             )
 
-        return results[0]
+        result = results[0]
+        # 严格判断：空字符串需要探针已在 _single_call 中打印，这里仅做业务层提示
+        if result == "":
+            raise RuntimeError(
+                f"LLM analyze调用失败: generate返回空字符串（API静默失败，内容被代理置空）\n"
+                f"Prompt长度: {len(prompt)} chars"
+            )
+
+        return result
     
     def estimate_cost(self, 
                       input_tokens: int, 
@@ -199,62 +213,3 @@ class LLMInterface:
                 output_tokens * model_price["output"])
         
         return cost
-
-
-# ========================================
-# 测试代码
-# ========================================
-if __name__ == "__main__":
-    print("测试LLM接口...")
-    
-    # 测试前请设置环境变量: export OPENAI_API_KEY=your_key
-    # 或者直接传入api_key参数
-    
-    try:
-        # 初始化接口
-        llm = LLMInterface(
-            provider="openai",
-            model_name="gpt-5.1", 
-            # api_key="your_key_here"  # 或者从环境变量读取
-        )
-        
-        # 测试生成
-        print("\n=== 测试代码生成 ===")
-        prompt = """请编写一个简单的Python函数，计算两个数的和。
-只输出代码，不要有任何解释。
-
-```python
-"""
-        
-        results = llm.generate(
-            prompt=prompt,
-            n=1,
-            temperature=0.7,
-            max_tokens=200
-        )
-        
-        for i, result in enumerate(results):
-            print(f"\n--- 结果 {i+1} ---")
-            print(result[:1000])  # 只显示前200字符
-        
-        # # 测试分析
-        # print("\n=== 测试分析功能 ===")
-        # analysis_prompt = "分析以下代码的时间复杂度: def foo(n): return sum(range(n))"
-        
-        # analysis = llm.analyze(
-        #     prompt=analysis_prompt,
-        #     temperature=0.3
-        # )
-        
-        # print(f"\n分析结果:\n{analysis[:1000]}")
-        
-        # # 估算成本
-        # print("\n=== 成本估算 ===")
-        # cost = llm.estimate_cost(input_tokens=500, output_tokens=1000)
-        # print(f"估算成本: ${cost:.6f}")
-        
-        # print("\n✅ LLM接口测试完成！")
-    
-    except Exception as e:
-        print(f"\n❌ 测试失败: {e}")
-        print("提示：请确保已设置API密钥环境变量")

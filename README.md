@@ -55,6 +55,9 @@ python run_evolution.py --num_generations 5 --episode_num 100
 
 # 完整进化（10代，2-3小时）
 python run_evolution.py --num_generations 10 --episode_num 200
+
+# 从中断处继续训练（假设已有2代历史）
+python run_evolution.py --resume --archive_dir experiments/evolution_archive --num_generations 5
 ```
 
 ### 3. 查看结果

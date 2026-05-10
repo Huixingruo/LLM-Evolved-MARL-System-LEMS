@@ -1,0 +1,658 @@
+{
+  "generation": 4,
+  "best_code": "import numpy as np\n\n\ndef compute_reward(agent_name, observation, global_state, actions, world):\n    if not global_state[\"is_adversary\"]:\n        return 0.0, {}\n\n    components = {}\n\n    # ------------------------\n    # 物理与任务常量（硬编码）\n    # ------------------------\n    adv_size = 0.075\n    prey_size = 0.050\n    world_size = 2.5\n    capture_threshold = 0.5\n\n    # 全局势场权重（仅调整数值，不改拓扑）\n    # 依据诊断报告重新平衡：\n    # - 削弱类似常数的大负向基底（例如整体收缩与集中时的持续负压）\n    # - 加强真正对包围/缩圈有帮助的正向项\n    # - 保持速度对齐和密集捕获的主导正向信号\n    w_radial_shrink = 0.4        # ↓↓ 显著削弱自半径偏差惩罚，避免长期负向主导\n    w_gap_closure = 1.4          # ↑↑ 强化角度间隙闭合的正向引导\n    w_alignment = 1.8            # ↑ 略增速度对齐权重，保持其作为主要可解释正奖励\n    w_capture_dense = 35.0       # ↑↑ 强化近端稠密包围奖励，突出协同收网价值\n    w_team_focus = 0.3           # ↓↓ 大幅削弱团队平均半径负压，防止持续惩罚\n    w_centrality = 0.25          # ↓↓ 降低质心偏差惩罚，避免与其他收缩项叠加过强负压\n    w_time_pressure = -0.001     # ↓ 进一步弱化时间惩罚，减小对协同结构探索的压制\n\n    # 安全与稳定\n    w_collision_hard = -1.0      # ↑ 相对整体负压削弱背景下，稍减碰撞惩罚绝对值\n    w_near_collision_soft = -0.25\n    safe_distance_factor = 1.3\n\n    # 解析全局状态\n    agent_positions = np.asarray(global_state[\"agent_positions\"], dtype=float)\n    agent_velocities = np.asarray(global_state[\"agent_velocities\"], dtype=float)\n    prey_pos = np.asarray(global_state[\"prey_position\"], dtype=float)\n    prey_vel = np.asarray(global_state[\"prey_velocity\"], dtype=float)\n    inter_agent_distances = np.asarray(\n        global_state[\"inter_agent_distances\"], dtype=float\n    )\n\n    num_agents = agent_positions.shape[0]\n\n    # 找到当前 agent 的索引\n    agent_index = None\n    for idx, ag in enumerate(world.agents):\n        if getattr(ag, \"name\", None) == agent_name:\n            agent_index = idx\n            break\n    if agent_index is None:\n        try:\n            agent_index = int(\"\".join(ch for ch in agent_name if ch.isdigit()))\n            if agent_index < 0 or agent_index >= num_agents:\n                agent_index = 0\n        except ValueError:\n            agent_index = 0\n\n    # adversary 与 prey 索引\n    adversary_indices = [\n        idx for idx, ag in enumerate(world.agents) if getattr(ag, \"adversary\", False)\n    ]\n    prey_index = None\n    for idx, ag in enumerate(world.agents):\n        if not getattr(ag, \"adversary\", False):\n            prey_index = idx\n            break\n\n    if prey_index is None or len(adversary_indices) == 0:\n        return 0.0, {}\n\n    # 本追捕者在 adversary 列表中的局部索引\n    try:\n        adv_local_index = adversary_indices.index(agent_index)\n    except ValueError:\n        adv_local_index = 0\n\n    adv_positions = agent_positions[adversary_indices]\n    adv_vels = agent_velocities[adversary_indices]\n\n    # ------------------------\n    # 极坐标视角：相对猎物的半径与角度\n    # ------------------------\n    rel_vecs = adv_positions - prey_pos[None, :]\n    radii = np.linalg.norm(rel_vecs, axis=1) + 1e-8\n    angles = np.arctan2(rel_vecs[:, 1], rel_vecs[:, 0])\n\n    # 当前 agent 极坐标\n    r_self = radii[adv_local_index]\n    theta_self = angles[adv_local_index]\n    vel_self = adv_vels[adv_local_index]\n\n    # ------------------------\n    # 1. 全局收缩势场（环形收缩 + 团队平均半径）\n    #    目标：所有追捕者逐步将半径缩小到 capture_threshold 附近\n    # ------------------------\n    if r_self > capture_threshold:\n        radial_potential = -(r_self - capture_threshold) / world_size\n    else:\n        radial_potential = -0.3 * (capture_threshold - r_self) / world_size\n\n    components[\"radial_shrink_self\"] = w_radial_shrink * radial_potential\n\n    mean_radius = float(np.mean(radii))\n    team_potential = -(mean_radius - capture_threshold) / world_size\n    components[\"radial_shrink_team\"] = w_team_focus * team_potential\n\n    # ------------------------\n    # 2. 角度势场：填补包围角间隙，而非固定均匀角度\n    # ------------------------\n    k = len(adversary_indices)\n    angle_gap_reward = 0.0\n    if k >= 2:\n        sort_idx = np.argsort(angles)\n        angles_sorted = angles[sort_idx]\n\n        diffs = np.diff(angles_sorted)\n        last_gap = (angles_sorted[0] + 2.0 * np.pi) - angles_sorted[-1]\n        gaps = np.concatenate([diffs, [last_gap]])\n        max_gap_idx = int(np.argmax(gaps))\n        max_gap = gaps[max_gap_idx]\n\n        start_angle = angles_sorted[max_gap_idx]\n        gap_center_angle = start_angle + max_gap / 2.0\n        gap_center_angle = (gap_center_angle + np.pi) % (2.0 * np.pi) - np.pi\n\n        d_theta = theta_self - gap_center_angle\n        d_theta = (d_theta + np.pi) % (2.0 * np.pi) - np.pi\n\n        angle_alignment = np.cos(d_theta)\n        gap_scale = max_gap / np.pi\n        angle_gap_reward = w_gap_closure * angle_alignment * gap_scale\n\n    components[\"angle_gap_closure\"] = angle_gap_reward\n\n    # ------------------------\n    # 3. 速度对齐势场：沿理想方向（指向 gap center 或径向内收）\n    # ------------------------\n    ideal_dir = np.zeros(2, dtype=float)\n    if r_self > capture_threshold * 1.2:\n        ideal_dir = -rel_vecs[adv_local_index] / r_self\n    else:\n        gap_tangent = np.array(\n            [-np.sin(theta_self), np.cos(theta_self)], dtype=float\n        )\n        if \"d_theta\" in locals():\n            direction_sign = np.sign(-d_theta) if abs(d_theta) > 1e-3 else 0.0\n            ideal_dir = gap_tangent * direction_sign\n        else:\n            ideal_dir = -rel_vecs[adv_local_index] / r_self\n\n    speed_self = np.linalg.norm(vel_self) + 1e-8\n    if speed_self > 1e-3:\n        dir_self = vel_self / speed_self\n        alignment = float(np.dot(dir_self, ideal_dir))\n        components[\"velocity_alignment\"] = w_alignment * alignment\n    else:\n        components[\"velocity_alignment\"] = 0.0\n\n    # ------------------------\n    # 4. 多体捕获势场：当多名追捕者同时进入小半径且包围较密时给强奖励\n    # ------------------------\n    inside_mask = radii <= capture_threshold\n    num_inside = int(np.sum(inside_mask))\n\n    dense_capture_reward = 0.0\n    if num_inside >= 2:\n        inner_radii = radii[inside_mask]\n        inner_angles = angles[inside_mask]\n\n        tightness = 1.0 - np.mean(inner_radii) / (capture_threshold + 1e-8)\n        tightness = max(0.0, tightness)\n\n        inner_sorted = np.sort(inner_angles)\n        inner_diffs = np.diff(inner_sorted)\n        last_inner_gap = (inner_sorted[0] + 2.0 * np.pi) - inner_sorted[-1]\n        inner_gaps = np.concatenate([inner_diffs, [last_inner_gap]])\n        max_inner_gap = float(np.max(inner_gaps))\n        coverage = 1.0 - max_inner_gap / (2.0 * np.pi)\n        coverage = np.clip(coverage, 0.0, 1.0)\n\n        count_factor = (num_inside - 1) / max(len(adversary_indices) - 1, 1)\n\n        dense_capture_score = tightness * coverage * count_factor\n        dense_capture_reward = w_capture_dense * dense_capture_score\n\n    components[\"dense_capture\"] = dense_capture_reward\n\n    # ------------------------\n    # 5. 团队几何中心势场：团队质心靠近猎物\n    # ------------------------\n    centroid = np.mean(adv_positions, axis=0)\n    centroid_dist = np.linalg.norm(centroid - prey_pos)\n    centroid_potential = -centroid_dist / world_size\n    components[\"centroid_centrality\"] = w_centrality * centroid_potential\n\n    # ------------------------\n    # 6. 安全势场：防止追捕者之间与猎物发生硬碰撞\n    # ------------------------\n    collision_penalty = 0.0\n    near_collision_penalty = 0.0\n\n    for j in adversary_indices:\n        if j == agent_index:\n            continue\n        d_ij = inter_agent_distances[agent_index, j]\n        min_dist = 2.0 * adv_size\n        safe_dist = safe_distance_factor * min_dist\n\n        if d_ij < min_dist:\n            collision_penalty += w_collision_hard\n        elif d_ij < safe_dist:\n            ratio = (safe_dist - d_ij) / (safe_dist - min_dist + 1e-8)\n            near_collision_penalty += w_near_collision_soft * ratio\n\n    d_prey = inter_agent_distances[agent_index, prey_index]\n    min_dist_ap = adv_size + prey_size\n    if d_prey < min_dist_ap:\n        collision_penalty += 0.5 * w_collision_hard\n\n    components[\"collision_penalty\"] = collision_penalty\n    components[\"near_collision_penalty\"] = near_collision_penalty\n\n    # ------------------------\n    # 7. 时间压力势场：线性时间惩罚（进一步削弱）\n    # ------------------------\n    components[\"time_pressure\"] = w_time_pressure\n\n    total_reward = float(sum(components.values()))\n    return total_reward, components",
+  "reflection": "[病理诊断]\n1. 整体效果与阶段定位  \n- Fitness=0.8508，成功率≈82%，平均捕获时间64.3步，说明任务已基本可解，策略质量中上，但还未到“稳定高效协同”的阶段。  \n- 当前更像是“能抓到，但协同质量一般、效率偏低”的状态，适合做精细调参和局部结构修补，而不是全部推翻（L1 不宜作为主流）。\n\n2. 主导奖励分量与行为推断  \n从绝对值和语义来看，目前真正主导学习信号的分量有三类：\n\n(1) 终局类/大额项  \n- capture_penalty: mean=-10.0, std=0  \n  - 绝对值远大于其他分量（多数在[-1,1]量级），对总回报具强支配性。  \n  - 记为 penalty 且为 -10，结合成功率较高，推断该项更像是“失败/逃脱惩罚”或“捕获过程中的一次性大惩罚”，其命名可能有些误导，但训练中它在“成败”上起了硬约束作用。  \n  - std=0 表示触发模式固定，要么所有episode统一在固定步长触发，要么该项设计为每局结尾固定结算。这降低了它对行为细节（如协同姿态、路径规划）的区分度，只在“成/败”层面提供信号。  \n\n(2) 运动/几何引导项  \n- velocity_alignment: mean=0.9749, std=1.0436  \n  - 平均正且量级最大，是当前密集奖励中最强的正向驱动力。  \n  - 高 std 表示在 episode 之间以及时间上差异大，对行为有显著区分作用。  \n  - 推断：策略会强烈倾向“速度方向对齐某个目标/队友/朝向”，是当前形成一定队形和协同移动的主因。  \n- angle_gap_closure: mean=-1.1916, std=0.9261  \n  - 均值明显为负且绝对值较大，可视为主要负向密集信号之一。  \n  - 该分量名字意图鼓励“闭合包围角”，但统计结果是负，这说明：\n    - 要么设计逻辑为“gap 未闭合 → 负值，大；闭合好 → 接近0或上界不够大”，导致即使有进步也总体偏负；  \n    - 要么方向搞反了，当前策略在“包围角控制”上长期处于惩罚区，对策略学习有抑制作用；  \n    - 甚至可能出现：为了躲避该项的惩罚，策略采取次优几何形态，只要最终能抓到就行，从而冲突于协同包围目标。  \n\n(3) 逃逸/稀疏过程项  \n- escape_reward: mean=-1.1619, std=0.7736  \n  - 均值为明显负值，说明当前设计从总体上给 agent 带来净惩罚而不是“奖励逃逸控制”或“抑制被逃脱”。  \n  - 如果该项原本想要“鼓励降低逃脱概率/压制猎物活动空间”，现在的统计说明：  \n    - 公式可能是“逃逸距离/速度”类直接取负 → 导致长期负值，缺少正向强化区；  \n    - 或只有在极少数状态给正奖励，导致整体均值偏负，噪声较大。  \n  - 此项目前更像“背景性负噪声”，对策略的明确导向作用存疑，反而增加优化难度。  \n\n3. 次要但有指向性的分量\n\n- dense_capture: mean=0.3354, std=0.7581  \n  - 正向，量级中等，方差也不小，说明在接近捕获时它确实在拉行为：  \n    - 鼓励多智能体在目标附近形成更紧密包围或靠近捕获点。  \n  - 但相对于 velocity_alignment、angle_gap_closure、escape_reward 的绝对值，其权重/贡献偏弱，很可能在“最终协同形态上”话语权不够。  \n\n- centroid_centrality: mean=-0.0976, std=0.0954  \n- radial_shrink_team: mean=-0.0995, std=0.1131  \n- radial_shrink_self: mean=-0.1397, std=0.1730  \n  - 三个都轻度负值，波动也不大，意味着：  \n    - 从当前实现方式看，它们更多提供“轻微惩罚背景”，而不是清晰的“向中心收缩/形成包围”正向奖励。  \n    - 这与预期“鼓励朝猎物/团队中心收缩围捕”的直觉不符。  \n    - 对策略而言，这种轻度负向+低区分度的项会被视为“噪声/背景成本”，不太改变策略主决策。  \n\n- time_pressure: mean=-0.001, std=0  \n  - 完全接近0且无方差，等价于失效分量，对加快捕获或惩罚拖延几乎不起作用。  \n  - 与平均捕获时间64步偏长相呼应：缺乏有效的时间密度压力，策略更倾向稳妥而非高效。  \n\n- boundary_penalty: mean=-0.3955, std=1.9965  \n  - 均值中等负，但方差很大，说明有不少 episode/片段发生明显的边界相关行为（贴边、触边或出界）。  \n  - 从协同角度看，边界行为常和“群体散开、单个agent追到边界”相关，这通常是非最优协同模式。  \n  - 目前该惩罚虽有一定约束，但显然不足以避免大幅度利用边界或出现边界上的不良姿态。\n\n- near_collision_penalty & collision_penalty: mean=0, std=0  \n  - 当前训练数据中完全未触发或在实现上为常数零。  \n  - 要么场景本身极少发生碰撞，要么检测逻辑/阈值导致永远不生效。  \n  - 在多智能体协同任务中，缺乏有效的防碰撞信号意味着：  \n    - 现有协同行为很可能是“松散队形 + 避免重合”的自然结果，而非被显式鼓励的“紧凑但无碰撞包围”。  \n    - 想进一步提高“formation_quality”时，这值为零是一个明显缺口。\n\n4. 协同指标解读与奖励协同性\n\n- encirclement_angle_std: mean=1.5776  \n  - 偏高的角度标准差表明：  \n    - 相对于猎物的角度分布不均匀，包围结构出现“多集中于一侧”或“局部堆叠”的情况。  \n  - 这与 angle_gap_closure 均值为强负值高度一致：  \n    - 当前“角度闭合”设计未成功驱动形成均匀包围，甚至可能起反效果。  \n\n- min_agent_distance: mean=0.8918  \n  - 不算极小，说明 agent 之间有一定安全距离，未出现极端拥挤。  \n  - 但缺乏 near_collision_penalty 的精细调节，这个距离可能是“保守的分散距离”而不是“最大化围捕效率的最优间距”。  \n\n- avg_distance_to_prey: mean=1.3301  \n  - 猎物平均距离不大，能持续保持围捕压力，这是当前成功率较高的重要因素。  \n  - 但结合 encirclement_angle_std 偏大，可以推断：  \n    - 是“集中在一边/几条腿”的压迫，而非均匀环形包围。  \n\n- formation_quality: mean=0.3123  \n  - 中等偏低，说明整体协同队形只是“尚可”，远未达到设计目标。  \n  - 对应到奖励分量：  \n    - 负责队形/几何协调的分量（angle_gap_closure, centroid_centrality, radial_shrink_*）均表现为“弱负/不达预期”，协同奖励体系明显偏弱或方向不佳。\n\n5. 综合诊断结论\n\n- 主导分量：  \n  - capture_penalty（终局成败信号）、velocity_alignment（运动对齐引导）是当前策略形成“能抓到”和“向目标协调移动”的主要驱动力。  \n- 失效或低效分量：  \n  - time_pressure 完全失效；near_collision_penalty & collision_penalty 在当前统计中完全不触发，相当于未实现。  \n- 可能起反作用的分量：  \n  - angle_gap_closure：均值强负且包围角度标准差仍然偏大，说明该设计没有成功引导包围，甚至可能在梯度方向上与“理想包围结构”不一致，诱导出不理想姿态。  \n  - escape_reward：长期显著负值，有可能把“压制猎物/防逃逸”的目标误写成一种全程负成本，整体梯度对行为的引导混乱。  \n  - centroid_centrality / radial_shrink_team / radial_shrink_self：轻度负且区分度不强，对“收缩/集中围捕”的设计目标支持不足。  \n- 协同缺陷：  \n  1) 包围质量不足：角度分布不均、formation_quality 中等偏低，当前更多是“朝同一方向追击 + 局部围堵”，缺乏真正的多方位挤压。  \n  2) 时间效率不佳：平均64步且 time_pressure 失效，缺乏明确的“越快越好”信号。  \n  3) 安全/紧凑性平衡缺位：没有有效的近距离防碰撞奖励/惩罚，导致难以在“更紧凑队形 + 安全间距”之间找到最优折中。  \n- 套路层面判断：  \n  - 当前范式并非根本错误，因为已有>80%成功率和合理的平均距离控制，不建议直接 L1 全面推翻。  \n  - 更适合：  \n    - 通过 F2 重构至少两类关键分量（angle_gap_closure、escape_reward 以及时间相关/收缩相关项），修正方向与稀疏性；  \n    - 通过 F3 对 capture_penalty 相对权重及 dense_capture / formation 相关项做比例调整；  \n    - 同时用 F1 补充“缺失的防碰撞/紧凑队形鼓励/更细粒度时间压力”等机制。  \n\n[算子分配]\nCandidate 0: F2\nCandidate 1: F3\nCandidate 2: F1\nCandidate 3: F1",
+  "best_fitness": 0.8507962524434025,
+  "all_results": [
+    {
+      "id": "candidate_0",
+      "status": "success",
+      "metrics": {
+        "fitness": 0.8507962524434025,
+        "success_rate": 0.8214,
+        "avg_capture_time": 64.3,
+        "reward_components": {
+          "escape_reward": {
+            "mean": -1.1618661755497115,
+            "std": 0.7735590540800458,
+            "min": -2.1163468290927128,
+            "max": 0.1,
+            "sum": -104608.62111561827,
+            "count": 90035
+          },
+          "near_collision_penalty": {
+            "mean": 0.0,
+            "std": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "sum": 0.0,
+            "count": 270105
+          },
+          "velocity_alignment": {
+            "mean": 0.974914635046387,
+            "std": 1.0435837936370014,
+            "min": -1.799999970769477,
+            "max": 1.7999999669587967,
+            "sum": 263329.31749920436,
+            "count": 270105
+          },
+          "dense_capture": {
+            "mean": 0.3354355867294911,
+            "std": 0.7580588878165466,
+            "min": 0.0,
+            "max": 7.367335626248498,
+            "sum": 90602.8291535692,
+            "count": 270105
+          },
+          "centroid_centrality": {
+            "mean": -0.09761734708543146,
+            "std": 0.09539496476685679,
+            "min": -0.960719763075053,
+            "max": -0.00014574945357873846,
+            "sum": -26366.933534510466,
+            "count": 270105
+          },
+          "time_pressure": {
+            "mean": -0.0010000000000000007,
+            "std": 6.505213034913027e-19,
+            "min": -0.001,
+            "max": -0.001,
+            "sum": -270.1050000000002,
+            "count": 270105
+          },
+          "radial_shrink_team": {
+            "mean": -0.0994704337584283,
+            "std": 0.11305089190524507,
+            "min": -1.2354695748880558,
+            "max": 0.019784449021886284,
+            "sum": -26867.461510320278,
+            "count": 270105
+          },
+          "angle_gap_closure": {
+            "mean": -1.1915859355117266,
+            "std": 0.9261226079648528,
+            "min": -2.795245144726208,
+            "max": 0.4660321126073342,
+            "sum": -321853.3191113949,
+            "count": 270105
+          },
+          "capture_penalty": {
+            "mean": -10.0,
+            "std": 0.0,
+            "min": -10.0,
+            "max": -10.0,
+            "sum": -449870.0,
+            "count": 44987
+          },
+          "collision_penalty": {
+            "mean": 0.0,
+            "std": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "sum": 0.0,
+            "count": 270105
+          },
+          "boundary_penalty": {
+            "mean": -0.3955402667373976,
+            "std": 1.9964568656410926,
+            "min": -20.0,
+            "max": -0.0,
+            "sum": -35612.46791570159,
+            "count": 90035
+          },
+          "radial_shrink_self": {
+            "mean": -0.13974272427103054,
+            "std": 0.17300861096232945,
+            "min": -2.218524243081184,
+            "max": -1.2133825756421855e-07,
+            "sum": -37745.2085392267,
+            "count": 270105
+          }
+        },
+        "collaboration_metrics": {
+          "encirclement_angle_std": {
+            "mean": 1.5775940793693497,
+            "std": 0.6797958757078384,
+            "min": 0.03798200722856888,
+            "max": 2.9544115066358,
+            "final": 1.0153390720315592
+          },
+          "min_agent_distance": {
+            "mean": 0.8917818480442427,
+            "std": 0.5898234872516916,
+            "min": 0.23090788354325545,
+            "max": 3.8692297008710077,
+            "final": 0.31758667453121264
+          },
+          "avg_distance_to_prey": {
+            "mean": 1.3300576246810933,
+            "std": 0.9586610402031868,
+            "min": 0.3393257338374749,
+            "max": 10.795579780733798,
+            "final": 0.491644752668591
+          },
+          "formation_quality": {
+            "mean": 0.3123208414780085,
+            "std": 0.14450293201359576,
+            "min": 0.005368902869690338,
+            "max": 0.8798910811898801,
+            "final": 0.44297421575010354
+          }
+        },
+        "raw_data": {},
+        "convergence_status": {
+          "f_mean": true,
+          "f_std": true,
+          "f_slope": true,
+          "is_converged": true,
+          "details": "J_em:-897.63, J_lm:-315.40, J_ev:481.91, J_lv:202.70, cov:65001.93"
+        },
+        "total_episodes": 3000
+      },
+      "fitness": 0.8507962524434025,
+      "code": "import numpy as np\n\n\ndef compute_reward(agent_name, observation, global_state, actions, world):\n    if not global_state[\"is_adversary\"]:\n        return 0.0, {}\n\n    components = {}\n\n    # ------------------------\n    # 物理与任务常量（硬编码）\n    # ------------------------\n    adv_size = 0.075\n    prey_size = 0.050\n    world_size = 2.5\n    capture_threshold = 0.5\n\n    # 全局势场权重（仅调整数值，不改拓扑）\n    # 依据诊断报告重新平衡：\n    # - 削弱类似常数的大负向基底（例如整体收缩与集中时的持续负压）\n    # - 加强真正对包围/缩圈有帮助的正向项\n    # - 保持速度对齐和密集捕获的主导正向信号\n    w_radial_shrink = 0.4        # ↓↓ 显著削弱自半径偏差惩罚，避免长期负向主导\n    w_gap_closure = 1.4          # ↑↑ 强化角度间隙闭合的正向引导\n    w_alignment = 1.8            # ↑ 略增速度对齐权重，保持其作为主要可解释正奖励\n    w_capture_dense = 35.0       # ↑↑ 强化近端稠密包围奖励，突出协同收网价值\n    w_team_focus = 0.3           # ↓↓ 大幅削弱团队平均半径负压，防止持续惩罚\n    w_centrality = 0.25          # ↓↓ 降低质心偏差惩罚，避免与其他收缩项叠加过强负压\n    w_time_pressure = -0.001     # ↓ 进一步弱化时间惩罚，减小对协同结构探索的压制\n\n    # 安全与稳定\n    w_collision_hard = -1.0      # ↑ 相对整体负压削弱背景下，稍减碰撞惩罚绝对值\n    w_near_collision_soft = -0.25\n    safe_distance_factor = 1.3\n\n    # 解析全局状态\n    agent_positions = np.asarray(global_state[\"agent_positions\"], dtype=float)\n    agent_velocities = np.asarray(global_state[\"agent_velocities\"], dtype=float)\n    prey_pos = np.asarray(global_state[\"prey_position\"], dtype=float)\n    prey_vel = np.asarray(global_state[\"prey_velocity\"], dtype=float)\n    inter_agent_distances = np.asarray(\n        global_state[\"inter_agent_distances\"], dtype=float\n    )\n\n    num_agents = agent_positions.shape[0]\n\n    # 找到当前 agent 的索引\n    agent_index = None\n    for idx, ag in enumerate(world.agents):\n        if getattr(ag, \"name\", None) == agent_name:\n            agent_index = idx\n            break\n    if agent_index is None:\n        try:\n            agent_index = int(\"\".join(ch for ch in agent_name if ch.isdigit()))\n            if agent_index < 0 or agent_index >= num_agents:\n                agent_index = 0\n        except ValueError:\n            agent_index = 0\n\n    # adversary 与 prey 索引\n    adversary_indices = [\n        idx for idx, ag in enumerate(world.agents) if getattr(ag, \"adversary\", False)\n    ]\n    prey_index = None\n    for idx, ag in enumerate(world.agents):\n        if not getattr(ag, \"adversary\", False):\n            prey_index = idx\n            break\n\n    if prey_index is None or len(adversary_indices) == 0:\n        return 0.0, {}\n\n    # 本追捕者在 adversary 列表中的局部索引\n    try:\n        adv_local_index = adversary_indices.index(agent_index)\n    except ValueError:\n        adv_local_index = 0\n\n    adv_positions = agent_positions[adversary_indices]\n    adv_vels = agent_velocities[adversary_indices]\n\n    # ------------------------\n    # 极坐标视角：相对猎物的半径与角度\n    # ------------------------\n    rel_vecs = adv_positions - prey_pos[None, :]\n    radii = np.linalg.norm(rel_vecs, axis=1) + 1e-8\n    angles = np.arctan2(rel_vecs[:, 1], rel_vecs[:, 0])\n\n    # 当前 agent 极坐标\n    r_self = radii[adv_local_index]\n    theta_self = angles[adv_local_index]\n    vel_self = adv_vels[adv_local_index]\n\n    # ------------------------\n    # 1. 全局收缩势场（环形收缩 + 团队平均半径）\n    #    目标：所有追捕者逐步将半径缩小到 capture_threshold 附近\n    # ------------------------\n    if r_self > capture_threshold:\n        radial_potential = -(r_self - capture_threshold) / world_size\n    else:\n        radial_potential = -0.3 * (capture_threshold - r_self) / world_size\n\n    components[\"radial_shrink_self\"] = w_radial_shrink * radial_potential\n\n    mean_radius = float(np.mean(radii))\n    team_potential = -(mean_radius - capture_threshold) / world_size\n    components[\"radial_shrink_team\"] = w_team_focus * team_potential\n\n    # ------------------------\n    # 2. 角度势场：填补包围角间隙，而非固定均匀角度\n    # ------------------------\n    k = len(adversary_indices)\n    angle_gap_reward = 0.0\n    if k >= 2:\n        sort_idx = np.argsort(angles)\n        angles_sorted = angles[sort_idx]\n\n        diffs = np.diff(angles_sorted)\n        last_gap = (angles_sorted[0] + 2.0 * np.pi) - angles_sorted[-1]\n        gaps = np.concatenate([diffs, [last_gap]])\n        max_gap_idx = int(np.argmax(gaps))\n        max_gap = gaps[max_gap_idx]\n\n        start_angle = angles_sorted[max_gap_idx]\n        gap_center_angle = start_angle + max_gap / 2.0\n        gap_center_angle = (gap_center_angle + np.pi) % (2.0 * np.pi) - np.pi\n\n        d_theta = theta_self - gap_center_angle\n        d_theta = (d_theta + np.pi) % (2.0 * np.pi) - np.pi\n\n        angle_alignment = np.cos(d_theta)\n        gap_scale = max_gap / np.pi\n        angle_gap_reward = w_gap_closure * angle_alignment * gap_scale\n\n    components[\"angle_gap_closure\"] = angle_gap_reward\n\n    # ------------------------\n    # 3. 速度对齐势场：沿理想方向（指向 gap center 或径向内收）\n    # ------------------------\n    ideal_dir = np.zeros(2, dtype=float)\n    if r_self > capture_threshold * 1.2:\n        ideal_dir = -rel_vecs[adv_local_index] / r_self\n    else:\n        gap_tangent = np.array(\n            [-np.sin(theta_self), np.cos(theta_self)], dtype=float\n        )\n        if \"d_theta\" in locals():\n            direction_sign = np.sign(-d_theta) if abs(d_theta) > 1e-3 else 0.0\n            ideal_dir = gap_tangent * direction_sign\n        else:\n            ideal_dir = -rel_vecs[adv_local_index] / r_self\n\n    speed_self = np.linalg.norm(vel_self) + 1e-8\n    if speed_self > 1e-3:\n        dir_self = vel_self / speed_self\n        alignment = float(np.dot(dir_self, ideal_dir))\n        components[\"velocity_alignment\"] = w_alignment * alignment\n    else:\n        components[\"velocity_alignment\"] = 0.0\n\n    # ------------------------\n    # 4. 多体捕获势场：当多名追捕者同时进入小半径且包围较密时给强奖励\n    # ------------------------\n    inside_mask = radii <= capture_threshold\n    num_inside = int(np.sum(inside_mask))\n\n    dense_capture_reward = 0.0\n    if num_inside >= 2:\n        inner_radii = radii[inside_mask]\n        inner_angles = angles[inside_mask]\n\n        tightness = 1.0 - np.mean(inner_radii) / (capture_threshold + 1e-8)\n        tightness = max(0.0, tightness)\n\n        inner_sorted = np.sort(inner_angles)\n        inner_diffs = np.diff(inner_sorted)\n        last_inner_gap = (inner_sorted[0] + 2.0 * np.pi) - inner_sorted[-1]\n        inner_gaps = np.concatenate([inner_diffs, [last_inner_gap]])\n        max_inner_gap = float(np.max(inner_gaps))\n        coverage = 1.0 - max_inner_gap / (2.0 * np.pi)\n        coverage = np.clip(coverage, 0.0, 1.0)\n\n        count_factor = (num_inside - 1) / max(len(adversary_indices) - 1, 1)\n\n        dense_capture_score = tightness * coverage * count_factor\n        dense_capture_reward = w_capture_dense * dense_capture_score\n\n    components[\"dense_capture\"] = dense_capture_reward\n\n    # ------------------------\n    # 5. 团队几何中心势场：团队质心靠近猎物\n    # ------------------------\n    centroid = np.mean(adv_positions, axis=0)\n    centroid_dist = np.linalg.norm(centroid - prey_pos)\n    centroid_potential = -centroid_dist / world_size\n    components[\"centroid_centrality\"] = w_centrality * centroid_potential\n\n    # ------------------------\n    # 6. 安全势场：防止追捕者之间与猎物发生硬碰撞\n    # ------------------------\n    collision_penalty = 0.0\n    near_collision_penalty = 0.0\n\n    for j in adversary_indices:\n        if j == agent_index:\n            continue\n        d_ij = inter_agent_distances[agent_index, j]\n        min_dist = 2.0 * adv_size\n        safe_dist = safe_distance_factor * min_dist\n\n        if d_ij < min_dist:\n            collision_penalty += w_collision_hard\n        elif d_ij < safe_dist:\n            ratio = (safe_dist - d_ij) / (safe_dist - min_dist + 1e-8)\n            near_collision_penalty += w_near_collision_soft * ratio\n\n    d_prey = inter_agent_distances[agent_index, prey_index]\n    min_dist_ap = adv_size + prey_size\n    if d_prey < min_dist_ap:\n        collision_penalty += 0.5 * w_collision_hard\n\n    components[\"collision_penalty\"] = collision_penalty\n    components[\"near_collision_penalty\"] = near_collision_penalty\n\n    # ------------------------\n    # 7. 时间压力势场：线性时间惩罚（进一步削弱）\n    # ------------------------\n    components[\"time_pressure\"] = w_time_pressure\n\n    total_reward = float(sum(components.values()))\n    return total_reward, components",
+      "generation": 4,
+      "sandbox_path": "experiments\\generation_004\\candidate_0"
+    },
+    {
+      "id": "candidate_1",
+      "status": "success",
+      "metrics": {
+        "fitness": 0.6914582371686606,
+        "success_rate": 0.6557,
+        "avg_capture_time": 70.6,
+        "reward_components": {
+          "collision_penalty": {
+            "mean": -1.5727647474218454e-06,
+            "std": 0.0012540981914638473,
+            "min": -1.0,
+            "max": 0.0,
+            "sum": -1.0,
+            "count": 635823
+          },
+          "velocity_alignment": {
+            "mean": 0.6790319471922077,
+            "std": 0.9630091315635867,
+            "min": -1.4999999418050651,
+            "max": 1.4999999721652215,
+            "sum": 431744.1297595911,
+            "count": 635823
+          },
+          "radial_shrink_team": {
+            "mean": -0.18791230752391386,
+            "std": 0.24929689056716936,
+            "min": -3.4349606728927164,
+            "max": 0.05456013034851934,
+            "sum": -119478.96710677748,
+            "count": 635823
+          },
+          "angle_gap_closure": {
+            "mean": -0.4775815092116633,
+            "std": 0.49959542233128607,
+            "min": -1.5981539580843493,
+            "max": 0.2664439275613291,
+            "sum": -303657.3079314874,
+            "count": 635823
+          },
+          "safe_compact_formation": {
+            "mean": 0.2894750954266633,
+            "std": 0.2526104427543256,
+            "min": 0.0,
+            "max": 0.795767682213615,
+            "sum": 184054.92359946732,
+            "count": 635823
+          },
+          "capture_penalty": {
+            "mean": -10.0,
+            "std": 0.0,
+            "min": -10.0,
+            "max": -10.0,
+            "sum": -1264820.0,
+            "count": 126482
+          },
+          "radial_shrink_self": {
+            "mean": -0.2547911244357333,
+            "std": 0.35706180511413704,
+            "min": -5.539019713285937,
+            "max": -1.7796815648507545e-07,
+            "sum": -162002.05711210126,
+            "count": 635823
+          },
+          "near_collision_penalty": {
+            "mean": -1.3786186157989703e-06,
+            "std": 0.0007773141519282115,
+            "min": -0.4382787120765744,
+            "max": 0.0,
+            "sum": -0.8765574241531487,
+            "count": 635823
+          },
+          "centroid_centrality": {
+            "mean": -0.1959188376364802,
+            "std": 0.22299344705986646,
+            "min": -2.781150052879772,
+            "max": -6.28803591251722e-05,
+            "sum": -124569.70310253974,
+            "count": 635823
+          },
+          "escape_reward": {
+            "mean": -1.3430149487435352,
+            "std": 0.6873045265640593,
+            "min": -2.3066476061752157,
+            "max": 0.1,
+            "sum": -284639.9312516536,
+            "count": 211941
+          },
+          "dense_capture": {
+            "mean": 0.24905802859306495,
+            "std": 0.5381650263056817,
+            "min": 0.0,
+            "max": 5.062413010921737,
+            "sum": 158356.82291412834,
+            "count": 635823
+          },
+          "time_pressure": {
+            "mean": -0.0030000000000000022,
+            "std": 2.168404344971009e-18,
+            "min": -0.003,
+            "max": -0.003,
+            "sum": -1907.4690000000014,
+            "count": 635823
+          },
+          "boundary_penalty": {
+            "mean": -0.11086446655930457,
+            "std": 0.9056766364891979,
+            "min": -20.0,
+            "max": -0.0,
+            "sum": -23496.72590704557,
+            "count": 211941
+          }
+        },
+        "collaboration_metrics": {
+          "encirclement_angle_std": {
+            "mean": 1.3036647108701052,
+            "std": 0.6345746153121351,
+            "min": 0.005514376962666669,
+            "max": 2.9418719552025725,
+            "final": 0.5699878053800682
+          },
+          "min_agent_distance": {
+            "mean": 0.8139397269238745,
+            "std": 0.5407080235384555,
+            "min": 0.2192813372171899,
+            "max": 6.687791741158529,
+            "final": 0.6038905634321851
+          },
+          "avg_distance_to_prey": {
+            "mean": 1.0874671982812398,
+            "std": 0.7777097750362305,
+            "min": 0.3294995826608771,
+            "max": 10.701059784314337,
+            "final": 0.4459088419370072
+          },
+          "formation_quality": {
+            "mean": 0.35453237620114075,
+            "std": 0.14573819098179305,
+            "min": 0.02127372297139405,
+            "max": 0.9514539301066487,
+            "final": 0.6073506945526987
+          }
+        },
+        "raw_data": {},
+        "convergence_status": {
+          "f_mean": true,
+          "f_std": true,
+          "f_slope": false,
+          "is_converged": false,
+          "details": "J_em:-803.43, J_lm:-557.97, J_ev:549.95, J_lv:273.63, cov:-28002.85"
+        },
+        "total_episodes": 3000
+      },
+      "fitness": 0.6914582371686606,
+      "code": "import numpy as np\n\n\ndef compute_reward(agent_name, observation, global_state, actions, world):\n    if not global_state[\"is_adversary\"]:\n        return 0.0, {}\n\n    components = {}\n\n    # ------------------------\n    # 物理与任务常量（硬编码）\n    # ------------------------\n    adv_size = 0.075\n    prey_size = 0.050\n    world_size = 2.5\n    capture_threshold = 0.5\n\n    # 全局势场权重（仅调整数值，不改拓扑）\n    # 放大正向协同与近端捕获信号\n    w_radial_shrink = 1.0        # ↓ 让半径偏差惩罚更温和\n    w_gap_closure = 0.8          # ↓ 减弱角度间隙负压，避免过度惩罚\n    w_alignment = 1.5            # ↑ 放大速度对齐的正向引导\n    w_capture_dense = 25.0       # ↑ 强化近端稠密包围奖励\n    w_team_focus = 0.8           # ↓ 降低团队平均半径的持续负压\n    w_centrality = 0.7           # ↓ 稍减质心偏差惩罚，避免多重负压叠加\n    w_time_pressure = -0.003     # ↓ 减弱几乎常数的时间惩罚\n\n    # 安全与稳定\n    w_collision_hard = -2.0\n    w_near_collision_soft = -0.5\n    safe_distance_factor = 1.3\n\n    # 解析全局状态\n    agent_positions = np.asarray(global_state[\"agent_positions\"], dtype=float)\n    agent_velocities = np.asarray(global_state[\"agent_velocities\"], dtype=float)\n    prey_pos = np.asarray(global_state[\"prey_position\"], dtype=float)\n    prey_vel = np.asarray(global_state[\"prey_velocity\"], dtype=float)\n    inter_agent_distances = np.asarray(\n        global_state[\"inter_agent_distances\"], dtype=float\n    )\n\n    num_agents = agent_positions.shape[0]\n\n    # 找到当前 agent 的索引\n    agent_index = None\n    for idx, ag in enumerate(world.agents):\n        if getattr(ag, \"name\", None) == agent_name:\n            agent_index = idx\n            break\n    if agent_index is None:\n        try:\n            agent_index = int(\"\".join(ch for ch in agent_name if ch.isdigit()))\n            if agent_index < 0 or agent_index >= num_agents:\n                agent_index = 0\n        except ValueError:\n            agent_index = 0\n\n    # adversary 与 prey 索引\n    adversary_indices = [\n        idx for idx, ag in enumerate(world.agents) if getattr(ag, \"adversary\", False)\n    ]\n    prey_index = None\n    for idx, ag in enumerate(world.agents):\n        if not getattr(ag, \"adversary\", False):\n            prey_index = idx\n            break\n\n    if prey_index is None or len(adversary_indices) == 0:\n        return 0.0, {}\n\n    # 本追捕者在 adversary 列表中的局部索引\n    try:\n        adv_local_index = adversary_indices.index(agent_index)\n    except ValueError:\n        adv_local_index = 0\n\n    adv_positions = agent_positions[adversary_indices]\n    adv_vels = agent_velocities[adversary_indices]\n\n    # ------------------------\n    # 极坐标视角：相对猎物的半径与角度\n    # ------------------------\n    rel_vecs = adv_positions - prey_pos[None, :]\n    radii = np.linalg.norm(rel_vecs, axis=1) + 1e-8\n    angles = np.arctan2(rel_vecs[:, 1], rel_vecs[:, 0])\n\n    # 当前 agent 极坐标\n    r_self = radii[adv_local_index]\n    theta_self = angles[adv_local_index]\n    vel_self = adv_vels[adv_local_index]\n\n    # ------------------------\n    # 1. 全局收缩势场（环形收缩 + 团队平均半径）\n    #    目标：所有追捕者逐步将半径缩小到 capture_threshold 附近\n    # ------------------------\n    if r_self > capture_threshold:\n        radial_potential = -(r_self - capture_threshold) / world_size\n    else:\n        radial_potential = -0.3 * (capture_threshold - r_self) / world_size\n\n    components[\"radial_shrink_self\"] = w_radial_shrink * radial_potential\n\n    mean_radius = float(np.mean(radii))\n    team_potential = -(mean_radius - capture_threshold) / world_size\n    components[\"radial_shrink_team\"] = w_team_focus * team_potential\n\n    # ------------------------\n    # 2. 角度势场：填补包围角间隙，而非固定均匀角度\n    # ------------------------\n    k = len(adversary_indices)\n    angle_gap_reward = 0.0\n    if k >= 2:\n        sort_idx = np.argsort(angles)\n        angles_sorted = angles[sort_idx]\n\n        diffs = np.diff(angles_sorted)\n        last_gap = (angles_sorted[0] + 2.0 * np.pi) - angles_sorted[-1]\n        gaps = np.concatenate([diffs, [last_gap]])\n        max_gap_idx = int(np.argmax(gaps))\n        max_gap = gaps[max_gap_idx]\n\n        start_angle = angles_sorted[max_gap_idx]\n        gap_center_angle = start_angle + max_gap / 2.0\n        gap_center_angle = (gap_center_angle + np.pi) % (2.0 * np.pi) - np.pi\n\n        d_theta = theta_self - gap_center_angle\n        d_theta = (d_theta + np.pi) % (2.0 * np.pi) - np.pi\n\n        angle_alignment = np.cos(d_theta)\n        gap_scale = max_gap / np.pi\n        angle_gap_reward = w_gap_closure * angle_alignment * gap_scale\n\n    components[\"angle_gap_closure\"] = angle_gap_reward\n\n    # ------------------------\n    # 3. 速度对齐势场：沿理想方向（指向 gap center 或径向内收）\n    # ------------------------\n    ideal_dir = np.zeros(2, dtype=float)\n    if r_self > capture_threshold * 1.2:\n        ideal_dir = -rel_vecs[adv_local_index] / r_self\n    else:\n        gap_tangent = np.array(\n            [-np.sin(theta_self), np.cos(theta_self)], dtype=float\n        )\n        if \"d_theta\" in locals():\n            direction_sign = np.sign(-d_theta) if abs(d_theta) > 1e-3 else 0.0\n            ideal_dir = gap_tangent * direction_sign\n        else:\n            ideal_dir = -rel_vecs[adv_local_index] / r_self\n\n    speed_self = np.linalg.norm(vel_self) + 1e-8\n    if speed_self > 1e-3:\n        dir_self = vel_self / speed_self\n        alignment = float(np.dot(dir_self, ideal_dir))\n        components[\"velocity_alignment\"] = w_alignment * alignment\n    else:\n        components[\"velocity_alignment\"] = 0.0\n\n    # ------------------------\n    # 4. 多体捕获势场：当多名追捕者同时进入小半径且包围较密时给强奖励\n    # ------------------------\n    inside_mask = radii <= capture_threshold\n    num_inside = int(np.sum(inside_mask))\n\n    dense_capture_reward = 0.0\n    if num_inside >= 2:\n        inner_radii = radii[inside_mask]\n        inner_angles = angles[inside_mask]\n\n        tightness = 1.0 - np.mean(inner_radii) / (capture_threshold + 1e-8)\n        tightness = max(0.0, tightness)\n\n        inner_sorted = np.sort(inner_angles)\n        inner_diffs = np.diff(inner_sorted)\n        last_inner_gap = (inner_sorted[0] + 2.0 * np.pi) - inner_sorted[-1]\n        inner_gaps = np.concatenate([inner_diffs, [last_inner_gap]])\n        max_inner_gap = float(np.max(inner_gaps))\n        coverage = 1.0 - max_inner_gap / (2.0 * np.pi)\n        coverage = np.clip(coverage, 0.0, 1.0)\n\n        count_factor = (num_inside - 1) / max(len(adversary_indices) - 1, 1)\n\n        dense_capture_score = tightness * coverage * count_factor\n        dense_capture_reward = w_capture_dense * dense_capture_score\n\n    components[\"dense_capture\"] = dense_capture_reward\n\n    # ------------------------\n    # 5. 团队几何中心势场：团队质心靠近猎物\n    # ------------------------\n    centroid = np.mean(adv_positions, axis=0)\n    centroid_dist = np.linalg.norm(centroid - prey_pos)\n    centroid_potential = -centroid_dist / world_size\n    components[\"centroid_centrality\"] = w_centrality * centroid_potential\n\n    # ------------------------\n    # 6. 安全势场：防止追捕者之间与猎物发生硬碰撞\n    # ------------------------\n    collision_penalty = 0.0\n    near_collision_penalty = 0.0\n\n    for j in adversary_indices:\n        if j == agent_index:\n            continue\n        d_ij = inter_agent_distances[agent_index, j]\n        min_dist = 2.0 * adv_size\n        safe_dist = safe_distance_factor * min_dist\n\n        if d_ij < min_dist:\n            collision_penalty += w_collision_hard\n        elif d_ij < safe_dist:\n            ratio = (safe_dist - d_ij) / (safe_dist - min_dist + 1e-8)\n            near_collision_penalty += w_near_collision_soft * ratio\n\n    d_prey = inter_agent_distances[agent_index, prey_index]\n    min_dist_ap = adv_size + prey_size\n    if d_prey < min_dist_ap:\n        collision_penalty += 0.5 * w_collision_hard\n\n    components[\"collision_penalty\"] = collision_penalty\n    components[\"near_collision_penalty\"] = near_collision_penalty\n\n    # ------------------------\n    # 7. 时间压力势场：线性时间惩罚（削弱强度）\n    # ------------------------\n    components[\"time_pressure\"] = w_time_pressure\n\n    # ------------------------\n    # 8. 新增：安全紧凑队形奖励（鼓励在安全间距下互相靠近）\n    # ------------------------\n    w_safe_compact = 0.8\n    compact_reward = 0.0\n\n    # 只在存在至少 2 个追捕者时计算\n    if len(adversary_indices) >= 2:\n        min_dist = 2.0 * adv_size\n        upper_dist = 1.2  # 软目标最大间距，鼓励从疏散向紧凑收缩\n\n        # 当前追捕者与其他追捕者的最小距离\n        min_pair_dist = np.inf\n        for j in adversary_indices:\n            if j == agent_index:\n                continue\n            d_ij = inter_agent_distances[agent_index, j]\n            if d_ij < min_pair_dist:\n                min_pair_dist = d_ij\n\n        if np.isfinite(min_pair_dist):\n            if min_pair_dist <= min_dist:\n                compact_reward = 0.0\n            elif min_pair_dist >= upper_dist:\n                compact_reward = 0.0\n            else:\n                # 在 [min_dist, upper_dist] 范围内线性归一化为 [1, 0]\n                ratio = (upper_dist - min_pair_dist) / (upper_dist - min_dist + 1e-8)\n                compact_reward = ratio\n\n    components[\"safe_compact_formation\"] = w_safe_compact * compact_reward\n\n    total_reward = float(sum(components.values()))\n    return total_reward, components",
+      "generation": 4,
+      "sandbox_path": "experiments\\generation_004\\candidate_1"
+    },
+    {
+      "id": "candidate_2",
+      "status": "success",
+      "metrics": {
+        "fitness": 0.2880509363031558,
+        "success_rate": 0.2833,
+        "avg_capture_time": 89.5,
+        "reward_components": {
+          "collision_penalty": {
+            "mean": 0.0,
+            "std": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "sum": 0.0,
+            "count": 805062
+          },
+          "radial_shrink_team": {
+            "mean": 0.5980987650305294,
+            "std": 0.2657359433361439,
+            "min": 4.843813982082827e-36,
+            "max": 0.7999999999966732,
+            "sum": 481506.58797300805,
+            "count": 805062
+          },
+          "velocity_alignment": {
+            "mean": 0.5509394084830943,
+            "std": 0.9944683339045756,
+            "min": -1.4999999730666091,
+            "max": 1.4999999796444916,
+            "sum": 443540.38207221683,
+            "count": 805062
+          },
+          "near_collision_penalty": {
+            "mean": -3.59529460584778e-06,
+            "std": 0.0010482999445648397,
+            "min": -0.464104899085943,
+            "max": 0.0,
+            "sum": -2.8944350659730254,
+            "count": 805062
+          },
+          "escape_reward": {
+            "mean": -1.2409609778519262,
+            "std": 0.6869466982108643,
+            "min": -2.1665609406695734,
+            "max": 0.1,
+            "sum": -333016.8422504758,
+            "count": 268354
+          },
+          "capture_penalty": {
+            "mean": -10.0,
+            "std": 0.0,
+            "min": -10.0,
+            "max": -10.0,
+            "sum": -1345740.0,
+            "count": 134574
+          },
+          "time_pressure": {
+            "mean": -0.003000000000000002,
+            "std": 1.734723475976807e-18,
+            "min": -0.003,
+            "max": -0.003,
+            "sum": -2415.1860000000015,
+            "count": 805062
+          },
+          "radial_shrink_self": {
+            "mean": 0.6811577242607529,
+            "std": 0.35092787944424053,
+            "min": 7.283827719632566e-113,
+            "max": 0.9999999999990654,
+            "sum": 548374.1998088103,
+            "count": 805062
+          },
+          "centroid_centrality": {
+            "mean": 0.5170481884432648,
+            "std": 0.21026504757066616,
+            "min": 2.032335117599206e-17,
+            "max": 0.699998992718039,
+            "sum": 416255.8486845117,
+            "count": 805062
+          },
+          "dense_capture": {
+            "mean": 0.1326090240475165,
+            "std": 0.3928706056046533,
+            "min": 0.0,
+            "max": 4.885600544682809,
+            "sum": 106758.48611774175,
+            "count": 805062
+          },
+          "angle_gap_closure": {
+            "mean": 0.1732964205293818,
+            "std": 0.1812601059914749,
+            "min": 0.001535669927239422,
+            "max": 0.7672939768441542,
+            "sum": 139514.36290422516,
+            "count": 805062
+          },
+          "boundary_penalty": {
+            "mean": -0.2997343930822208,
+            "std": 1.614306575817889,
+            "min": -20.0,
+            "max": -0.0,
+            "sum": -80434.92332118627,
+            "count": 268354
+          }
+        },
+        "collaboration_metrics": {
+          "encirclement_angle_std": {
+            "mean": 1.4076506345299307,
+            "std": 0.62016721770295,
+            "min": 0.01224536929649954,
+            "max": 2.9378179546433465,
+            "final": 0.6810190601897107
+          },
+          "min_agent_distance": {
+            "mean": 0.9070391878763291,
+            "std": 0.5853078515208646,
+            "min": 0.190061406066045,
+            "max": 8.841661239923924,
+            "final": 0.8945535623761472
+          },
+          "avg_distance_to_prey": {
+            "mean": 1.1928109188080198,
+            "std": 0.7491975389980365,
+            "min": 0.34351885558424905,
+            "max": 9.848441588130228,
+            "final": 0.7002818204012953
+          },
+          "formation_quality": {
+            "mean": 0.31417577983486245,
+            "std": 0.12406808076320283,
+            "min": 0.00873970942647598,
+            "max": 0.8892042359153141,
+            "final": 0.3659420803306168
+          }
+        },
+        "raw_data": {},
+        "convergence_status": {
+          "f_mean": true,
+          "f_std": true,
+          "f_slope": true,
+          "is_converged": true,
+          "details": "J_em:10.92, J_lm:168.92, J_ev:315.34, J_lv:233.05, cov:23189.95"
+        },
+        "total_episodes": 3000
+      },
+      "fitness": 0.2880509363031558,
+      "code": "import numpy as np\n\n\ndef compute_reward(agent_name, observation, global_state, actions, world):\n    if not global_state[\"is_adversary\"]:\n        return 0.0, {}\n\n    components = {}\n\n    # ------------------------\n    # 物理与任务常量（硬编码）\n    # ------------------------\n    adv_size = 0.075\n    prey_size = 0.050\n    world_size = 2.5\n    capture_threshold = 0.5\n\n    # 全局势场权重（保留有效项权重）\n    w_radial_shrink = 1.0\n    w_gap_closure = 1.2         # ↑ 强化角度闭合正向引导\n    w_alignment = 1.5\n    w_capture_dense = 25.0\n    w_team_focus = 0.8\n    w_centrality = 0.7\n    w_time_pressure = -0.003\n\n    # 安全与稳定\n    w_collision_hard = -2.0\n    w_near_collision_soft = -0.5\n    safe_distance_factor = 1.3\n\n    # ------------------------\n    # 解析全局状态\n    # ------------------------\n    agent_positions = np.asarray(global_state[\"agent_positions\"], dtype=float)\n    agent_velocities = np.asarray(global_state[\"agent_velocities\"], dtype=float)\n    prey_pos = np.asarray(global_state[\"prey_position\"], dtype=float)\n    prey_vel = np.asarray(global_state[\"prey_velocity\"], dtype=float)\n    inter_agent_distances = np.asarray(\n        global_state[\"inter_agent_distances\"], dtype=float\n    )\n\n    num_agents = agent_positions.shape[0]\n\n    # 找到当前 agent 的索引\n    agent_index = None\n    for idx, ag in enumerate(world.agents):\n        if getattr(ag, \"name\", None) == agent_name:\n            agent_index = idx\n            break\n    if agent_index is None:\n        try:\n            agent_index = int(\"\".join(ch for ch in agent_name if ch.isdigit()))\n            if agent_index < 0 or agent_index >= num_agents:\n                agent_index = 0\n        except ValueError:\n            agent_index = 0\n\n    # adversary 与 prey 索引\n    adversary_indices = [\n        idx for idx, ag in enumerate(world.agents) if getattr(ag, \"adversary\", False)\n    ]\n    prey_index = None\n    for idx, ag in enumerate(world.agents):\n        if not getattr(ag, \"adversary\", False):\n            prey_index = idx\n            break\n\n    if prey_index is None or len(adversary_indices) == 0:\n        return 0.0, {}\n\n    # 本追捕者在 adversary 列表中的局部索引\n    try:\n        adv_local_index = adversary_indices.index(agent_index)\n    except ValueError:\n        adv_local_index = 0\n\n    adv_positions = agent_positions[adversary_indices]\n    adv_vels = agent_velocities[adversary_indices]\n\n    # ------------------------\n    # 极坐标视角：相对猎物的半径与角度\n    # ------------------------\n    rel_vecs = adv_positions - prey_pos[None, :]\n    radii = np.linalg.norm(rel_vecs, axis=1) + 1e-8\n    angles = np.arctan2(rel_vecs[:, 1], rel_vecs[:, 0])\n\n    # 当前 agent 极坐标\n    r_self = radii[adv_local_index]\n    theta_self = angles[adv_local_index]\n    vel_self = adv_vels[adv_local_index]\n\n    # ========================\n    # 1. 重构径向收缩分量\n    # ========================\n    # 使用 sigmoidal 形状的正向“靠近 capture_threshold”奖励\n    # 目标半径区间 [capture_threshold, 2*capture_threshold] 给高奖励，\n    # 过远或过近都衰减，避免长期负压。\n    ideal_r = capture_threshold * 1.5\n    max_r = world_size\n    # 归一化半径误差\n    radial_error = (r_self - ideal_r) / (max_r - ideal_r + 1e-8)\n    # 平滑钟形奖励：r 在 ideal_r 附近时接近 1，远离时衰减至 0\n    radial_shrink_self_score = np.exp(-4.0 * radial_error**2)\n    components[\"radial_shrink_self\"] = w_radial_shrink * radial_shrink_self_score\n\n    # 团队平均半径：鼓励团队整体处在合理收缩带，但不再线性惩罚\n    mean_radius = float(np.mean(radii))\n    team_radial_error = (mean_radius - ideal_r) / (max_r - ideal_r + 1e-8)\n    radial_shrink_team_score = np.exp(-3.0 * team_radial_error**2)\n    components[\"radial_shrink_team\"] = w_team_focus * radial_shrink_team_score\n\n    # ========================\n    # 2. 重构角度 gap 闭合分量\n    # ========================\n    # 显式鼓励角度均匀覆盖：gap 越均匀，奖励越高；\n    # 同时鼓励当前 agent 向最大 gap 中心靠拢，且不再长期给负值。\n    k = len(adversary_indices)\n    angle_gap_reward = 0.0\n    if k >= 2:\n        sort_idx = np.argsort(angles)\n        angles_sorted = angles[sort_idx]\n\n        diffs = np.diff(angles_sorted)\n        last_gap = (angles_sorted[0] + 2.0 * np.pi) - angles_sorted[-1]\n        gaps = np.concatenate([diffs, [last_gap]])\n        max_gap_idx = int(np.argmax(gaps))\n        max_gap = float(gaps[max_gap_idx])\n\n        # 全局覆盖均匀度奖励：若最大 gap 接近 2π/k，则奖励更高\n        target_gap = 2.0 * np.pi / k\n        gap_error = (max_gap - target_gap) / (2.0 * np.pi)\n        uniformity_score = np.exp(-6.0 * gap_error**2)\n        # 当前 agent 向最大 gap 中心靠拢奖励\n        start_angle = angles_sorted[max_gap_idx]\n        gap_center_angle = start_angle + max_gap / 2.0\n        gap_center_angle = (gap_center_angle + np.pi) % (2.0 * np.pi) - np.pi\n\n        d_theta = theta_self - gap_center_angle\n        d_theta = (d_theta + np.pi) % (2.0 * np.pi) - np.pi\n\n        # 将角度偏差映射到 [0,1]，0 为完美居中\n        local_centering_score = np.exp(-4.0 * (d_theta / np.pi) ** 2)\n\n        # 综合得分：既要整体均匀，又要本体靠近 gap 中心\n        angle_gap_score = uniformity_score * local_centering_score\n        angle_gap_reward = w_gap_closure * angle_gap_score\n\n    components[\"angle_gap_closure\"] = angle_gap_reward\n\n    # ========================\n    # 3. 速度对齐势场（保持原逻辑）\n    # ========================\n    ideal_dir = np.zeros(2, dtype=float)\n    if r_self > capture_threshold * 1.2:\n        ideal_dir = -rel_vecs[adv_local_index] / r_self\n    else:\n        gap_tangent = np.array(\n            [-np.sin(theta_self), np.cos(theta_self)], dtype=float\n        )\n        if \"d_theta\" in locals():\n            direction_sign = np.sign(-d_theta) if abs(d_theta) > 1e-3 else 0.0\n            ideal_dir = gap_tangent * direction_sign\n        else:\n            ideal_dir = -rel_vecs[adv_local_index] / r_self\n\n    speed_self = np.linalg.norm(vel_self) + 1e-8\n    if speed_self > 1e-3:\n        dir_self = vel_self / speed_self\n        alignment = float(np.dot(dir_self, ideal_dir))\n        components[\"velocity_alignment\"] = w_alignment * alignment\n    else:\n        components[\"velocity_alignment\"] = 0.0\n\n    # ========================\n    # 4. 多体捕获势场（保持原逻辑）\n    # ========================\n    inside_mask = radii <= capture_threshold\n    num_inside = int(np.sum(inside_mask))\n\n    dense_capture_reward = 0.0\n    if num_inside >= 2:\n        inner_radii = radii[inside_mask]\n        inner_angles = angles[inside_mask]\n\n        tightness = 1.0 - np.mean(inner_radii) / (capture_threshold + 1e-8)\n        tightness = max(0.0, tightness)\n\n        inner_sorted = np.sort(inner_angles)\n        inner_diffs = np.diff(inner_sorted)\n        last_inner_gap = (inner_sorted[0] + 2.0 * np.pi) - inner_sorted[-1]\n        inner_gaps = np.concatenate([inner_diffs, [last_inner_gap]])\n        max_inner_gap = float(np.max(inner_gaps))\n        coverage = 1.0 - max_inner_gap / (2.0 * np.pi)\n        coverage = np.clip(coverage, 0.0, 1.0)\n\n        count_factor = (num_inside - 1) / max(len(adversary_indices) - 1, 1)\n\n        dense_capture_score = tightness * coverage * count_factor\n        dense_capture_reward = w_capture_dense * dense_capture_score\n\n    components[\"dense_capture\"] = dense_capture_reward\n\n    # ========================\n    # 5. 重构团队几何中心分量\n    # ========================\n    # 由线性负惩罚改为“靠近给奖励，过远衰减”的正向势场，\n    # 同时在适度距离内增强梯度。\n    centroid = np.mean(adv_positions, axis=0)\n    centroid_dist = np.linalg.norm(centroid - prey_pos)\n    # 归一化距离\n    norm_cd = centroid_dist / (world_size + 1e-8)\n    # 钟形奖励：质心距离在 0 附近最高，随距离增加指数衰减\n    centroid_score = np.exp(-3.0 * norm_cd**2)\n    components[\"centroid_centrality\"] = w_centrality * centroid_score\n\n    # ========================\n    # 6. 安全势场：重构软碰撞与紧凑性\n    # ========================\n    collision_penalty = 0.0\n    near_collision_penalty = 0.0\n\n    # 安全区间：鼓励在安全距离带内相互靠近，避免过疏散\n    min_dist = 2.0 * adv_size\n    safe_dist = safe_distance_factor * min_dist\n    tight_dist = 0.8 * safe_dist  # 希望在 [min_dist, tight_dist] 形成紧凑但安全队形\n    compact_bonus = 0.0\n    compact_weight = 0.3  # 正向紧凑奖励权重\n\n    for j in adversary_indices:\n        if j == agent_index:\n            continue\n        d_ij = inter_agent_distances[agent_index, j]\n        if d_ij < min_dist:\n            # 硬碰撞：保持强负惩罚\n            collision_penalty += w_collision_hard\n        elif d_ij < safe_dist:\n            # 软碰撞：使用平滑二次惩罚，距离越接近 min_dist 惩罚越大\n            ratio = (safe_dist - d_ij) / (safe_dist - min_dist + 1e-8)\n            near_collision_penalty += w_near_collision_soft * (ratio**2)\n        elif min_dist < d_ij <= tight_dist:\n            # 安全紧凑带：给予正向奖励，鼓励形成紧密包围\n            # 映射到 [0,1]，d_ij 越靠近 min_dist，奖励越高\n            compact_ratio = (tight_dist - d_ij) / (tight_dist - min_dist + 1e-8)\n            compact_bonus += compact_weight * (compact_ratio**2)\n\n    # 与猎物的硬碰撞维持原逻辑\n    d_prey = inter_agent_distances[agent_index, prey_index]\n    min_dist_ap = adv_size + prey_size\n    if d_prey < min_dist_ap:\n        collision_penalty += 0.5 * w_collision_hard\n\n    components[\"collision_penalty\"] = collision_penalty\n    components[\"near_collision_penalty\"] = near_collision_penalty + compact_bonus\n\n    # ========================\n    # 7. 时间压力势场（保持原逻辑）\n    # ========================\n    components[\"time_pressure\"] = w_time_pressure\n\n    total_reward = float(sum(components.values()))\n    return total_reward, components",
+      "generation": 4,
+      "sandbox_path": "experiments\\generation_004\\candidate_2"
+    },
+    {
+      "id": "candidate_3",
+      "status": "success",
+      "metrics": {
+        "fitness": 0.032033155972750575,
+        "success_rate": 0.046,
+        "avg_capture_time": 98.4,
+        "reward_components": {
+          "radial_inward_team": {
+            "mean": -0.3455729620514087,
+            "std": 0.3298252285667699,
+            "min": -4.468016196733319,
+            "max": 0.06565448492764243,
+            "sum": -306094.3612936937,
+            "count": 885759
+          },
+          "encirclement_coverage": {
+            "mean": 1.0946040357872964,
+            "std": 0.46565826768413676,
+            "min": 0.0020878656818764663,
+            "max": 1.9973833787631117,
+            "sum": 969555.3761349198,
+            "count": 885759
+          },
+          "escape_reward": {
+            "mean": -1.0598584194531213,
+            "std": 0.7042679244809649,
+            "min": -2.265101036604822,
+            "max": 0.1,
+            "sum": -312926.3779187924,
+            "count": 295253
+          },
+          "team_focus": {
+            "mean": -0.36323754384366935,
+            "std": 0.3354386623974369,
+            "min": -4.561962161786723,
+            "max": -0.0005140630433751322,
+            "sum": -321740.9235974247,
+            "count": 885759
+          },
+          "multi_agent_capture": {
+            "mean": 0.022076143426286894,
+            "std": 0.10318769007397889,
+            "min": 0.0,
+            "max": 1.4420602564164717,
+            "sum": 19554.142725124453,
+            "count": 885759
+          },
+          "ring_compact_self": {
+            "mean": -0.6595330761659682,
+            "std": 0.4256745980360958,
+            "min": -1.5,
+            "max": 0.0,
+            "sum": -584187.3580116918,
+            "count": 885759
+          },
+          "encirclement_uniformity": {
+            "mean": 1.7206725282275166,
+            "std": 0.5708978414781838,
+            "min": 0.33611715424250177,
+            "max": 2.9947269543427617,
+            "sum": 1524101.1779302768,
+            "count": 885759
+          },
+          "boundary_penalty": {
+            "mean": 0.016233810923847146,
+            "std": 1.155403110884294,
+            "min": -20.0,
+            "max": 0.5,
+            "sum": 19172.325506794565,
+            "count": 1181012
+          },
+          "energy_penalty": {
+            "mean": 0.02020728653239933,
+            "std": 0.006250690185284457,
+            "min": 3.046218274397228e-05,
+            "max": 0.028284271247461905,
+            "sum": 17898.7859116515,
+            "count": 885759
+          },
+          "ring_radius_team": {
+            "mean": -0.6178553758503956,
+            "std": 0.6533703396059091,
+            "min": -8.856032393466638,
+            "max": -5.807632659227124e-06,
+            "sum": -547270.9598578706,
+            "count": 885759
+          },
+          "encirclement_quality": {
+            "mean": 1.407638282007406,
+            "std": 0.5152438273996987,
+            "min": 0.16910250996218912,
+            "max": 2.496055166552937,
+            "sum": 1246828.277032598,
+            "count": 885759
+          },
+          "capture_penalty": {
+            "mean": -10.0,
+            "std": 0.0,
+            "min": -10.0,
+            "max": -10.0,
+            "sum": -1059130.0,
+            "count": 105913
+          },
+          "ring_radius_self": {
+            "mean": -0.6666116295964538,
+            "std": 0.7561135971753606,
+            "min": -9.685055598161634,
+            "max": -1.1580247756270979e-07,
+            "sum": -590457.2504197253,
+            "count": 885759
+          },
+          "collision_penalty": {
+            "mean": -1.6934628945345179e-06,
+            "std": 0.001593797814650651,
+            "min": -1.5,
+            "max": 0.0,
+            "sum": -1.5,
+            "count": 885759
+          },
+          "radial_inward_self": {
+            "mean": -0.3513683662223969,
+            "std": 0.3951534094527299,
+            "min": -4.882527799080817,
+            "max": 0.030604040664192887,
+            "sum": -311227.6926967841,
+            "count": 885759
+          },
+          "time_penalty": {
+            "mean": -0.0010000000000000009,
+            "std": 8.673617379884035e-19,
+            "min": -0.001,
+            "max": -0.001,
+            "sum": -885.7590000000007,
+            "count": 885759
+          },
+          "near_collision_penalty": {
+            "mean": -8.194068813115337e-06,
+            "std": 0.0017172833555252965,
+            "min": -0.6879801343553307,
+            "max": 0.0,
+            "sum": -7.257970197836228,
+            "count": 885759
+          }
+        },
+        "collaboration_metrics": {
+          "encirclement_angle_std": {
+            "mean": 1.4645533258999603,
+            "std": 0.62492807272557,
+            "min": 0.009949036997231115,
+            "max": 2.9583854828534166,
+            "final": 1.8301995432891864
+          },
+          "min_agent_distance": {
+            "mean": 1.017234924527892,
+            "std": 0.6593982764714192,
+            "min": 0.17435738342889195,
+            "max": 9.217162423631931,
+            "final": 0.3613013855837634
+          },
+          "avg_distance_to_prey": {
+            "mean": 1.3707551801581437,
+            "std": 0.8468272340546147,
+            "min": 0.35401716521884913,
+            "max": 11.670040481833295,
+            "final": 0.5556779336473565
+          },
+          "formation_quality": {
+            "mean": 0.2814603324620147,
+            "std": 0.10496652960279694,
+            "min": 0.01046331225097504,
+            "max": 0.7999624422252378,
+            "final": 0.3691610398959234
+          }
+        },
+        "raw_data": {},
+        "convergence_status": {
+          "f_mean": true,
+          "f_std": true,
+          "f_slope": true,
+          "is_converged": true,
+          "details": "J_em:-1497.52, J_lm:-68.69, J_ev:1386.03, J_lv:378.35, cov:95046.67"
+        },
+        "total_episodes": 3000
+      },
+      "fitness": 0.032033155972750575,
+      "code": "import numpy as np\n\n\ndef compute_reward(agent_name, observation, global_state, actions, world):\n    if not global_state[\"is_adversary\"]:\n        return 0.0, {}\n\n    components = {}\n\n    # ------------------------\n    # 物理与任务常量（硬编码）\n    # ------------------------\n    adv_size = 0.075\n    prey_size = 0.050\n    world_size = 2.5\n    capture_radius = 0.5\n\n    # 队形与协同权重（全新范式）\n    w_ring_radius = 2.0         # 理想环半径势场\n    w_ring_compact = 1.5        # 环上邻居距离紧凑度\n    w_encirclement = 3.0        # 包围角覆盖与均匀度\n    w_radial_inward = 1.0       # 向内协同收缩\n    w_focus = 1.0               # 中心聚焦（团队到猎物）\n    w_capture = 10.0            # 真正多体包围捕获奖励\n    w_safe_compact = 0.8        # 安全前提下的紧凑协同\n    w_boundary = -0.5           # 远离边界惩罚\n    w_energy = -0.02            # 动作能量惩罚（轻微）\n    w_time = -0.001             # 轻微时间压力\n\n    # 安全与碰撞\n    w_collision_hard = -3.0\n    w_near_collision_soft = -0.8\n    safety_factor = 1.3\n\n    # 解析全局状态\n    agent_positions = np.asarray(global_state[\"agent_positions\"], dtype=float)\n    agent_velocities = np.asarray(global_state[\"agent_velocities\"], dtype=float)\n    prey_pos = np.asarray(global_state[\"prey_position\"], dtype=float)\n    prey_vel = np.asarray(global_state[\"prey_velocity\"], dtype=float)\n    inter_agent_distances = np.asarray(\n        global_state[\"inter_agent_distances\"], dtype=float\n    )\n\n    num_agents = agent_positions.shape[0]\n\n    # 找到当前 agent 的索引\n    agent_index = None\n    for idx, ag in enumerate(world.agents):\n        if getattr(ag, \"name\", None) == agent_name:\n            agent_index = idx\n            break\n    if agent_index is None:\n        try:\n            agent_index = int(\"\".join(ch for ch in agent_name if ch.isdigit()))\n            if agent_index < 0 or agent_index >= num_agents:\n                agent_index = 0\n        except ValueError:\n            agent_index = 0\n\n    # adversary 与 prey 索引\n    adversary_indices = [\n        idx for idx, ag in enumerate(world.agents) if getattr(ag, \"adversary\", False)\n    ]\n    prey_index = None\n    for idx, ag in enumerate(world.agents):\n        if not getattr(ag, \"adversary\", False):\n            prey_index = idx\n            break\n\n    if prey_index is None or len(adversary_indices) == 0:\n        return 0.0, {}\n\n    # 本追捕者在 adversary 列表中的局部索引\n    try:\n        adv_local_index = adversary_indices.index(agent_index)\n    except ValueError:\n        adv_local_index = 0\n\n    adv_positions = agent_positions[adversary_indices]\n    adv_velocities = agent_velocities[adversary_indices]\n    k = len(adversary_indices)\n\n    self_pos = agent_positions[agent_index]\n    self_vel = agent_velocities[agent_index]\n\n    # ------------------------\n    # 相对猎物坐标系（全新视角）\n    # ------------------------\n    rel_vecs = adv_positions - prey_pos[None, :]\n    radii = np.linalg.norm(rel_vecs, axis=1) + 1e-8\n    angles = np.arctan2(rel_vecs[:, 1], rel_vecs[:, 0])\n\n    r_self = radii[adv_local_index]\n    theta_self = angles[adv_local_index]\n\n    # ------------------------\n    # 1. 环形势场：鼓励形成围绕猎物的“安全环”\n    # ------------------------\n    # 理想环半径为捕获半径稍外侧\n    ideal_ring_radius = capture_radius * 1.2\n    ring_radius_error = np.abs(r_self - ideal_ring_radius) / world_size\n    ring_radius_reward = -ring_radius_error\n    components[\"ring_radius_self\"] = w_ring_radius * ring_radius_reward\n\n    # 团队平均环半径接近理想值\n    mean_radius = float(np.mean(radii))\n    mean_radius_error = np.abs(mean_radius - ideal_ring_radius) / world_size\n    ring_radius_team_reward = -mean_radius_error\n    components[\"ring_radius_team\"] = w_ring_radius * ring_radius_team_reward\n\n    # ------------------------\n    # 2. 环上紧凑度：在安全距离内鼓励追捕者彼此更紧凑\n    # ------------------------\n    safe_min_dist = safety_factor * (2.0 * adv_size)\n    # 计算当前 agent 与其最近的其他追捕者距离\n    min_dist_to_teammate = np.inf\n    for j in adversary_indices:\n        if j == agent_index:\n            continue\n        d_ij = inter_agent_distances[agent_index, j]\n        if d_ij < min_dist_to_teammate:\n            min_dist_to_teammate = d_ij\n\n    if np.isfinite(min_dist_to_teammate):\n        if min_dist_to_teammate >= safe_min_dist:\n            # 距离过大，线性鼓励靠近到安全边缘\n            # 将 [safe_min_dist, world_size] 映射到 [0, -1]\n            far_ratio = (min_dist_to_teammate - safe_min_dist) / (\n                world_size - safe_min_dist + 1e-8\n            )\n            compact_reward = -np.clip(far_ratio, 0.0, 1.0)\n        else:\n            # 已在安全阈内，不再鼓励继续靠近（避免挤压）\n            compact_reward = 0.0\n    else:\n        compact_reward = 0.0\n\n    components[\"ring_compact_self\"] = w_ring_compact * compact_reward\n\n    # ------------------------\n    # 3. 包围角分布势场：覆盖度 + 均匀度\n    # ------------------------\n    encirclement_reward = 0.0\n    uniformity_reward = 0.0\n    coverage_reward = 0.0\n\n    if k >= 2:\n        sort_idx = np.argsort(angles)\n        angles_sorted = angles[sort_idx]\n        diffs = np.diff(angles_sorted)\n        last_gap = (angles_sorted[0] + 2.0 * np.pi) - angles_sorted[-1]\n        gaps = np.concatenate([diffs, [last_gap]])\n        max_gap = float(np.max(gaps))\n\n        # 覆盖度：gap 越小越好\n        coverage = 1.0 - max_gap / (2.0 * np.pi)\n        coverage = np.clip(coverage, 0.0, 1.0)\n        coverage_reward = coverage\n\n        # 均匀度：gap 与均匀 gap 的偏差\n        uniform_gap = 2.0 * np.pi / float(k)\n        gap_deviation = np.mean(np.abs(gaps - uniform_gap))\n        # 将 [0, π] -> [1, 0]\n        uniformity = 1.0 - gap_deviation / np.pi\n        uniformity = np.clip(uniformity, 0.0, 1.0)\n        uniformity_reward = uniformity\n\n        # 加权综合包围质量\n        encirclement_reward = 0.5 * coverage + 0.5 * uniformity\n\n    components[\"encirclement_quality\"] = w_encirclement * encirclement_reward\n    components[\"encirclement_uniformity\"] = w_encirclement * uniformity_reward\n    components[\"encirclement_coverage\"] = w_encirclement * coverage_reward\n\n    # ------------------------\n    # 4. 协同径向收缩：整体向猎物收网而不过度压缩\n    # ------------------------\n    # 只要半径大于捕获半径，就鼓励向内缩小半径\n    radial_inward_reward = 0.0\n    if r_self > capture_radius:\n        radial_inward_reward = (capture_radius - r_self) / world_size\n    else:\n        # 已在捕获半径内，鼓励稍微保持，不再继续强压缩\n        radial_inward_reward = 0.2 * (capture_radius - r_self) / world_size\n\n    components[\"radial_inward_self\"] = w_radial_inward * radial_inward_reward\n\n    # 团队平均收缩趋势\n    mean_radial_inward = np.mean(\n        (capture_radius - radii) / world_size\n    )\n    components[\"radial_inward_team\"] = w_radial_inward * mean_radial_inward\n\n    # ------------------------\n    # 5. 团队聚焦：追捕者质心靠近猎物\n    # ------------------------\n    centroid = np.mean(adv_positions, axis=0)\n    centroid_dist = np.linalg.norm(centroid - prey_pos)\n    centroid_focus_reward = -centroid_dist / world_size\n    components[\"team_focus\"] = w_focus * centroid_focus_reward\n\n    # ------------------------\n    # 6. 多体捕获：在小半径形成高覆盖包围时强奖励\n    # ------------------------\n    inside_mask = radii <= capture_radius\n    num_inside = int(np.sum(inside_mask))\n    capture_reward = 0.0\n\n    if num_inside >= 2:\n        inner_radii = radii[inside_mask]\n        inner_angles = angles[inside_mask]\n\n        tightness = 1.0 - np.mean(inner_radii) / (capture_radius + 1e-8)\n        tightness = np.clip(tightness, 0.0, 1.0)\n\n        inner_sorted = np.sort(inner_angles)\n        inner_diffs = np.diff(inner_sorted)\n        last_inner_gap = (inner_sorted[0] + 2.0 * np.pi) - inner_sorted[-1]\n        inner_gaps = np.concatenate([inner_diffs, [last_inner_gap]])\n        max_inner_gap = float(np.max(inner_gaps))\n        inner_coverage = 1.0 - max_inner_gap / (2.0 * np.pi)\n        inner_coverage = np.clip(inner_coverage, 0.0, 1.0)\n\n        participation = (num_inside - 1) / max(k - 1, 1)\n        capture_score = tightness * inner_coverage * participation\n        capture_reward = capture_score\n\n    components[\"multi_agent_capture\"] = w_capture * capture_reward\n\n    # ------------------------\n    # 7. 碰撞与安全：硬约束 + 近距离软惩罚\n    # ------------------------\n    collision_penalty = 0.0\n    near_collision_penalty = 0.0\n\n    min_dist = 2.0 * adv_size\n    safe_dist = safety_factor * min_dist\n\n    for j in adversary_indices:\n        if j == agent_index:\n            continue\n        d_ij = inter_agent_distances[agent_index, j]\n        if d_ij < min_dist:\n            collision_penalty += w_collision_hard\n        elif d_ij < safe_dist:\n            ratio = (safe_dist - d_ij) / (safe_dist - min_dist + 1e-8)\n            near_collision_penalty += w_near_collision_soft * ratio\n\n    # 与猎物直接硬碰撞\n    d_prey = inter_agent_distances[agent_index, prey_index]\n    min_dist_ap = adv_size + prey_size\n    if d_prey < min_dist_ap:\n        collision_penalty += 0.5 * w_collision_hard\n\n    components[\"collision_penalty\"] = collision_penalty\n    components[\"near_collision_penalty\"] = near_collision_penalty\n\n    # ------------------------\n    # 8. 边界势场：鼓励远离地图边缘\n    # ------------------------\n    # 将坐标归一化到 [-1,1]，距边界越近惩罚越大\n    norm_pos = self_pos / world_size\n    margin = 1.0 - np.clip(np.abs(norm_pos), 0.0, 1.0)\n    # margin 越小越靠边界\n    boundary_penalty = -np.mean(1.0 - margin)\n    components[\"boundary_penalty\"] = w_boundary * boundary_penalty\n\n    # ------------------------\n    # 9. 能量与动作平滑惩罚（仅依赖当前动作范数）\n    # ------------------------\n    action_vec = np.asarray(actions.get(agent_name, np.zeros(2)), dtype=float)\n    action_norm = np.linalg.norm(action_vec)\n    energy_penalty = -action_norm\n    components[\"energy_penalty\"] = w_energy * energy_penalty\n\n    # ------------------------\n    # 10. 轻微时间压力（每步固定小惩罚）\n    # ------------------------\n    components[\"time_penalty\"] = w_time\n\n    total_reward = float(sum(components.values()))\n    return total_reward, components",
+      "generation": 4,
+      "sandbox_path": "experiments\\generation_004\\candidate_3"
+    }
+  ],
+  "timestamp": "2026-04-15T14:22:05.611950",
+  "metadata": {}
+}

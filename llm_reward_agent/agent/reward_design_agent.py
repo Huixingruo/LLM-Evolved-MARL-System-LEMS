@@ -12,6 +12,7 @@ import os
 import re
 import ast
 import yaml
+import concurrent.futures
 from typing import List, Dict, Tuple, Optional
 
 from .llm_interface import LLMInterface
@@ -65,7 +66,8 @@ class RewardDesignAgent:
         self.env_context = PREDEFINED_ENV_CONTEXT  # 使用预定义的环境上下文
         self.task_description = PREDEFINED_TASK_DESCRIPTION  # 使用预定义的任务描述
         self.current_generation = 0
-        
+        self.cot_analysis_result = None  # CoT思维链分析结果（两阶段管线用）
+
         print("\n✅ 智能体初始化完成！(使用预定义环境上下文)")
         print("=" * 80)
     
@@ -98,11 +100,47 @@ class RewardDesignAgent:
                 api_key = config_key
 
         return api_key
+
+    def _save_llm_interaction(self, generation: int, phase: str, prompt: str, response: str, candidate_id: str = None):
+        """
+        强制拦截并保存大模型的交互记录
+        目录结构: save_dir/llm_interactions/generation_X/
+        """
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # 构建独立存储目录
+        log_dir = os.path.join(
+            self.config['logging']['save_dir'],
+            'llm_interactions',
+            f'generation_{generation}'
+        )
+        os.makedirs(log_dir, exist_ok=True)
+
+        # 组装文件名
+        filename_parts = [timestamp, phase]
+        if candidate_id is not None:
+            filename_parts.append(f"candidate_{candidate_id}")
+        filename = "_".join(filename_parts) + ".md"  # 使用Markdown格式便于阅读代码
+
+        filepath = os.path.join(log_dir, filename)
+
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(f"# LLM Interaction Log\n\n")
+            f.write(f"- **Generation**: {generation}\n")
+            f.write(f"- **Phase**: {phase}\n")
+            if candidate_id is not None:
+                f.write(f"- **Candidate Info**: {candidate_id}\n")
+            f.write(f"- **Timestamp**: {timestamp}\n")
+            f.write(f"\n{'='*80}\n## Prompt (Sent to LLM)\n{'='*80}\n\n")
+            f.write(f"```text\n{prompt}\n```\n")
+            f.write(f"\n{'='*80}\n## Response (From LLM)\n{'='*80}\n\n")
+            f.write(f"```text\n{response}\n```\n")
     
     def initialize(self, env_file_path: str = None, task_description: str = None):
         """
         初始化智能体（使用预定义环境上下文，无需动态提取）
-        
+
         Args:
             env_file_path: 环境文件路径（可选，已使用预定义上下文）
             task_description: 任务描述（可选，默认为 PREDEFINED_TASK_DESCRIPTION）
@@ -110,35 +148,30 @@ class RewardDesignAgent:
         print("\n" + "=" * 80)
         print("初始化任务环境")
         print("=" * 80)
-        
+
         # 使用预定义的环境上下文
         self.env_context = PREDEFINED_ENV_CONTEXT
-        
+
         # 如果提供了自定义任务描述，则使用它
         if task_description:
             self.task_description = task_description
         else:
             self.task_description = PREDEFINED_TASK_DESCRIPTION
-        
+
+        # 每次初始化重置CoT缓存（确保新一代从头开始）
+        self.cot_analysis_result = None
+
         # 打印关键信息
         print(f"✅ 环境名称: {self.env_context.get('env_name', 'simple_tag_env')}")
         print(f"✅ 智能体数量: {self.env_context.get('agent_info', {})} 个")
         print(f"✅ 物理常量: {self.env_context.get('physical_constants', {})}")
         print(f"✅ 任务描述: {self.task_description[:100]}...")
-        
-        # 打印Token估算
-        prompt = self.prompt_builder.initial_generation_prompt_with_predefined_context(
-            self.task_description,
-            self.env_context
-        )
-        token_estimate = len(prompt) // 4
-        print(f"✅ 提示词Token估算: ~{token_estimate}")
-        
+
         print("=" * 80)
     
     def generate_candidates(self, generation: int) -> List[str]:
         """
-        生成候选奖励函数代码（使用预定义环境上下文）
+        生成候选奖励函数代码（引入CoT两阶段管线）
 
         Args:
             generation: 当前代数
@@ -152,8 +185,6 @@ class RewardDesignAgent:
 
         max_retries = 3
         min_valid_codes = 2  # 至少需要2个有效候选
-
-        # 获取配置中的生成数量
         n_candidates = self.config['generation']['num_candidates']
 
         for attempt in range(max_retries):
@@ -161,34 +192,60 @@ class RewardDesignAgent:
                 raw_outputs = []
 
                 if generation == 0:
-                    # 第一代：Zero-Shot生成（使用预定义上下文）
-                    print(f"📝 使用Zero-Shot策略生成... (尝试 {attempt + 1}/{max_retries})")
-                    prompt = self.prompt_builder.initial_generation_prompt_with_predefined_context(
+                    # ==========================================
+                    # 阶段一：强制执行CoT环境解析（仅执行一次并缓存）
+                    # ==========================================
+                    if not self.cot_analysis_result:
+                        print(f"🔍 [阶段一] 执行CoT环境与任务结构分析...")
+                        analysis_prompt = self.prompt_builder.cot_analysis_prompt(
+                            self.task_description, self.env_context
+                        )
+                        # 低温度采样保证逻辑严密性
+                        self.cot_analysis_result = self.llm.analyze(
+                            prompt=analysis_prompt,
+                            temperature=0.3,
+                            max_tokens=10000
+                        )
+                        # 【新增埋点1】保存CoT分析记录
+                        self._save_llm_interaction(generation, "Phase1_CoT_Analysis", analysis_prompt, self.cot_analysis_result)
+                        print("   ✅ CoT环境解析完成，已建立MDP表征先验。")
+
+                    # ==========================================
+                    # 阶段二：基于CoT先验并行生成候选代码
+                    # ==========================================
+                    print(f"📝 [阶段二] 基于先验并行生成代码... (尝试 {attempt + 1}/{max_retries})")
+                    prompt = self.prompt_builder.initial_generation_prompt_with_cot(
                         self.task_description,
-                        self.env_context
+                        self.env_context,
+                        self.cot_analysis_result
                     )
 
-                    # 并行生成 n 个
+                    # 依赖底层多线程实现并发，适当提高温度增加搜索宽度
                     raw_outputs = self.llm.generate(
                         prompt=prompt,
                         n=n_candidates,
-                        temperature=self.config['generation']['temperature'],
+                        temperature=min(1.0, self.config['generation']['temperature'] + 0.2),
                         max_tokens=self.config['generation']['max_tokens'],
                         system_message=self.prompt_builder.SYSTEM_MESSAGE
                     )
 
+                    # 【新增埋点2】拆解并发返回的数组，按候选ID逐个保存
+                    for idx, out in enumerate(raw_outputs):
+                        self._save_llm_interaction(generation, "Phase2_Initial_Generation", prompt, out, candidate_id=str(idx))
+
                 else:
-                    # 后续代：基于父本进化（使用预定义上下文）
-                    print(f"🧬 使用进化策略生成... (尝试 {attempt + 1}/{max_retries})")
-                    
-                    # 获取父代代码和反思，如果失败则回退到Zero-Shot
+                    # ==========================================
+                    # 阶段三：基于 DREAM 算子执行自适应并行突变
+                    # ==========================================
+                    from collections import Counter
+
+                    print(f"🧬 执行 DREAM 自适应变异... (尝试 {attempt + 1}/{max_retries})")
+
                     try:
                         parent_code = self.memory.get_best_code(generation - 1)
                         reflection = self.memory.get_reflection(generation - 1)
-                    except (ValueError, IndexError) as e:
-                        print(f"⚠️ 无法获取第{generation-1}代数据: {e}")
-                        print("   回退到Zero-Shot策略生成...")
-                        # 回退到Zero-Shot
+                    except Exception as e:
+                        print(f"⚠️ 无法获取父代数据，回退到 Zero-Shot: {e}")
                         prompt = self.prompt_builder.initial_generation_prompt_with_predefined_context(
                             self.task_description,
                             self.env_context
@@ -200,43 +257,83 @@ class RewardDesignAgent:
                             max_tokens=self.config['generation']['max_tokens'],
                             system_message=self.prompt_builder.SYSTEM_MESSAGE
                         )
-                        codes = self._parse_code_blocks(raw_outputs)
-                        valid_codes = []
-                        for i, code in enumerate(codes):
-                            if self._syntax_check(code):
-                                valid_codes.append(code)
-                        if len(valid_codes) >= min_valid_codes:
-                            return valid_codes[:n_candidates]
+                        continue  # 直接进入下一轮重试，避免访问未定义的 reflection
+
+                    # ---------------------------------------------------
+                    # 核心解析逻辑：从反思日志中提取算子分配并执行基数校验
+                    # ---------------------------------------------------
+                    assigned_operators = []
+                    # 使用正则匹配 Candidate X: F1 格式
+                    matches = re.findall(r'Candidate \d+:\s*(F1|F2|F3|L1)', reflection, re.IGNORECASE)
+
+                    if len(matches) >= n_candidates:
+                        assigned_operators = [m.upper() for m in matches[:n_candidates]]
+                        # 基数约束校验：每种算子最多2次
+                        counts = Counter(assigned_operators)
+                        is_valid = all(v <= 2 for v in counts.values())
+
+                        if is_valid:
+                            print(f"   ✅ 成功解析自适应算子: {assigned_operators} (约束校验通过)")
                         else:
-                            print(f"⚠️ 生成候选不足，继续重试...")
-                            continue
+                            print(f"   ⚠️ LLM违反基数约束 {dict(counts)}，触发强制纠正。")
+                            assigned_operators = []  # 触发兜底��制
+                    else:
+                        print(f"   ⚠️ 未能在反思中解析到规范的算子分配，触发兜底分配。")
 
-                    # 调用新的 prompt 模板（不需要传 n_candidates）
-                    prompt = self.prompt_builder.evolution_prompt_with_predefined_context(
-                        task_description=self.task_description,
-                        parent_code=parent_code,
-                        reflection=reflection,
-                        env_context=self.env_context  # 确保传入环境上下文
-                    )
+                    # 兜底机制：恢复标准波束搜索
+                    if not assigned_operators:
+                        operators = ['F1', 'F2', 'F3', 'L1']
+                        assigned_operators = [operators[i % 4] for i in range(n_candidates)]
+                        print(f"   🔧 启用标准正交分配: {assigned_operators}")
+                    # ---------------------------------------------------
 
-                    # 关键修改：利用 LLM 的 temperature 采样特性
-                    # 请求 n=n_candidates 次独立生成，而不是让它一次写完
-                    # 提高 temperature 可以增加变体之间的差异性
-                    evolution_temp = min(1.0, self.config['generation']['temperature'] + 0.1)
+                    def _call_evoleap(op_type: str, worker_idx: int) -> str:
+                        """单线程执行单一突变算子"""
+                        prompt = self.prompt_builder.evoleap_prompt(
+                            operator_type=op_type,
+                            task_description=self.task_description,
+                            parent_code=parent_code,
+                            reflection=reflection,
+                            env_context=self.env_context
+                        )
+                        res = self.llm.generate(
+                            prompt=prompt,
+                            n=1,
+                            temperature=self.config['generation']['temperature'],
+                            max_tokens=self.config['generation']['max_tokens'],
+                            system_message=self.prompt_builder.SYSTEM_MESSAGE
+                        )
+                        response_text = res[0] if res else ""
 
-                    raw_outputs = self.llm.generate(
-                        prompt=prompt,
-                        n=n_candidates,  # 这里让 API 并行生成 N 份结果
-                        temperature=evolution_temp,
-                        max_tokens=self.config['generation']['max_tokens'],
-                        system_message=self.prompt_builder.SYSTEM_MESSAGE
-                    )
+                        # 落盘拦截
+                        if hasattr(self, '_save_llm_interaction'):
+                            self._save_llm_interaction(
+                                generation, "Phase3_DREAM", prompt, response_text,
+                                candidate_id=f"worker{worker_idx}_{op_type}"
+                            )
+                        return response_text
 
-                # 统一解析逻辑：不再需要 _parse_variants
-                # 因为现在每个 output 应该就是一个完整的函数
+                    print(f"   启动 {n_candidates} 个并发自适应变异线程...")
+
+                    # 并发执行
+                    raw_outputs = []
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=n_candidates) as executor:
+                        future_to_op = {executor.submit(_call_evoleap, op, idx): op for idx, op in enumerate(assigned_operators)}
+                        for future in concurrent.futures.as_completed(future_to_op):
+                            op = future_to_op[future]
+                            try:
+                                result = future.result()
+                                if result:
+                                    raw_outputs.append(result)
+                            except Exception as exc:
+                                print(f"   ❌ 算子 {op} 执行出错: {exc}")
+
+                        # 若并发获取结果过少，抛出异常进入重试
+                        if len(raw_outputs) < min_valid_codes:
+                            raise RuntimeError(f"DREAM自适应变异失败，仅获取到 {len(raw_outputs)} 份代码")
+
+                # 统一解析与语法检查
                 codes = self._parse_code_blocks(raw_outputs)
-
-                # 语法检查和过滤
                 valid_codes = []
                 for i, code in enumerate(codes):
                     if self._syntax_check(code):
@@ -245,22 +342,20 @@ class RewardDesignAgent:
                     else:
                         print(f"  ❌ 候选 {i}: 语法错误，已跳过")
 
-                # 检查是否有足够的有效代码
                 if len(valid_codes) >= min_valid_codes:
                     print(f"\n✅ 成功生成 {len(valid_codes)} 个有效候选")
-                    return valid_codes
+                    return valid_codes[:n_candidates]
                 else:
                     print(f"\n⚠️ 有效代码不足（{len(valid_codes)}/{min_valid_codes}），重新生成...")
 
             except Exception as e:
                 print(f"\n❌ 生成失败: {e}")
                 import traceback
-                traceback.print_exc()  # 打印详细错误堆栈方便调试
+                traceback.print_exc()
                 if attempt < max_retries - 1:
                     print(f"   重试中...")
 
-        # 所有尝试都失败，使用后备方案
-        print("\n⚠️ 所有尝试都失败，使用后备方案...")
+        print("\n⚠️ 所有尝试都失败，触发后备方案...")
         return self._get_fallback_codes(generation)
     
     def _get_fallback_codes(self, generation: int) -> List[str]:
@@ -311,34 +406,60 @@ class RewardDesignAgent:
         else:
             raise FileNotFoundError(f"基准文件不存在: {baseline_path}")
     
-    def analyze_results(self, results: List[Dict]) -> Tuple[str, str]:
+    def analyze_results(self, results: List[Dict]) -> Tuple[str, str, float]:
         """
-        分析训练结果，生成反思
-        
+        分析训练结果并选择最优模板（实装降级选拔机制）
+
         Args:
             results: 训练结果列表
-        
+
         Returns:
-            Tuple[str, str]: (最优代码, 反思内容)
+            Tuple[str, str, float]: (最优代码, 反思内容, 过滤后的best_fitness)
         """
         print(f"\n{'=' * 80}")
-        print("🔍 分析训练结果")
+        print("🔍 评估过滤与最优策略选拔")
         print(f"{'=' * 80}")
-        
-        # 1. 找到最优代码
+
         valid_results = [r for r in results if r.get('status') == 'success']
-        
         if not valid_results:
-            print("⚠️ 所有候选都训练失败，使用后备方案...")
-            # 返回第一个候选和默认反思
-            return results[0]['code'], "所有候选训练失败，需要检查环境或训练配置。"
-        
-        best_result = max(valid_results, key=lambda x: x.get('fitness', -float('inf')))
-        
-        print(f"✅ 最优候选: {best_result['id']}")
-        print(f"   Fitness: {best_result['fitness']:.4f}")
-        
-        # 2. 构建日志摘要（只包含最优候选的日志，因为只提供给LLM最优代码）
+            print("⚠️ 灾难性错误：所有候选执行崩溃，使用后备方案...")
+            return results[0]['code'], "所有候选训练时发生运行时错误，请检查代码基本逻辑。", 0.0
+
+        # =========================================================
+        # 降级选拔算法 (Degradation Selection Algorithm)
+        # =========================================================
+        best_result = None
+
+        # 优先级1：完全通过拦截器 (f_mean ∩ f_std ∩ f_slope)
+        fully_converged = [
+            r for r in valid_results
+            if r.get('metrics', {}).get('convergence_status', {}).get('is_converged', False)
+        ]
+
+        if fully_converged:
+            print("✅ 选拔优先级 1：存在完全收敛的奖励函数代码")
+            best_result = max(fully_converged, key=lambda x: x.get('fitness', -float('inf')))
+        else:
+            # 优先级2：放宽条件，放弃对波动方差(f_std)的要求，只要趋势上升(f_mean ∩ f_slope)
+            trend_converged = [
+                r for r in valid_results
+                if r.get('metrics', {}).get('convergence_status', {}).get('f_mean', False)
+                and r.get('metrics', {}).get('convergence_status', {}).get('f_slope', False)
+            ]
+            if trend_converged:
+                print("⚠️ 选拔优先级 2：无完全收敛代码，降级选取趋势上升的代码")
+                best_result = max(trend_converged, key=lambda x: x.get('fitness', -float('inf')))
+            else:
+                # 优先级3：彻底失败，取最高适应度（盲目相信Max）
+                print("🚨 选拔优先级 3：本代候选全军覆没(均未收敛)，降级选取绝对适应度最高者进行突变")
+                best_result = max(valid_results, key=lambda x: x.get('fitness', -float('inf')))
+
+        conv_stats = best_result.get('metrics', {}).get('convergence_status', {})
+        print(f"👑 最优候选 ID: {best_result['id']}")
+        print(f"   标量Fitness: {best_result['fitness']:.4f}")
+        print(f"   收敛性诊断: {conv_stats.get('details', 'N/A')}")
+        print(f"   完全收敛状态: {'✅' if conv_stats.get('is_converged') else '❌'}")
+
         logs_summary = self._format_logs([best_result])
 
         # 3. 调用LLM生成Reflection（带重试机制）
@@ -361,6 +482,8 @@ class RewardDesignAgent:
                 # 检查返回是否有效
                 if reflection and reflection.strip():
                     print(f"   ✅ 反思生成成功")
+                    # 【新增埋点4】反思生成成功后保存
+                    self._save_llm_interaction(self.current_generation, "Phase4_Reflection", prompt, reflection, candidate_id="best_code_diagnosis")
                     break
                 else:
                     print(f"   ⚠️ 返回为空，继续重试...")
@@ -411,7 +534,8 @@ class RewardDesignAgent:
         print(f"\n📊 反思内容（前200字符）:")
         print(reflection[:200] + "..." if len(reflection) > 200 else reflection)
 
-        return best_result['code'], reflection
+        # 【重点修改】：必须返回 best_result['fitness']，而不能让外部去重新瞎算 max()
+        return best_result['code'], reflection, best_result['fitness']
     
     def step(self, generation: int, use_real_training: bool = True) -> Dict:
         """
@@ -458,28 +582,22 @@ class RewardDesignAgent:
             # 使用模拟数据（用于快速测试）
             results = self._simulate_training(codes)
         
-        # 3. 分析结果
-        best_code, reflection = self.analyze_results(results)
-        
-        # 4. 计算fitness
-        valid_results = [r for r in results if r.get('status') == 'success']
-        if valid_results:
-            best_fitness = max(r.get('fitness', 0) for r in valid_results)
-        else:
-            best_fitness = 0.0
-        
-        # 5. 更新记忆
+        # 3. 分析结果 【重点修改：接收三个返回值】
+        best_code, reflection, best_fitness = self.analyze_results(results)
+
+        # 4. 更新记忆 【重点修改：显式传入 selected_fitness】
         self.memory.save(
             generation=generation,
             best_code=best_code,
             reflection=reflection,
-            all_results=results
+            all_results=results,
+            selected_fitness=best_fitness
         )
         
         return {
             'generation': generation,
             'best_code': best_code,
-            'best_fitness': best_fitness,
+            'best_fitness': best_fitness,  # 这里记录的是降级选拔后的真实性能
             'reflection': reflection,
             'all_results': results
         }
@@ -506,32 +624,7 @@ class RewardDesignAgent:
                         codes.append(output.strip())
         
         return codes
-    
-    def _parse_variants(self, raw_output: str) -> List[str]:
-        """解析包含多个变体的输出"""
-        # 按 # === VARIANT X === 分割
-        variants = re.split(r'#\s*===\s*VARIANT\s+\d+\s*===', raw_output)
-        
-        # 过滤掉空字符串
-        variants = [v.strip() for v in variants if v.strip()]
-        
-        # 提取每个变体中的代码
-        codes = []
-        for variant in variants:
-            # 尝试提取代码块
-            matches = re.findall(r'```python\n(.*?)\n```', variant, re.DOTALL)
-            if matches:
-                codes.append(matches[0].strip())
-            elif 'def compute_reward' in variant:
-                # 直接使用文本
-                codes.append(variant.strip())
-        
-        # 如果解析失败，尝试按代码块分割
-        if len(codes) == 0:
-            codes = self._parse_code_blocks([raw_output])
-        
-        return codes
-    
+
     def _syntax_check(self, code: str) -> bool:
         """检查代码语法是否正确"""
         try:
@@ -583,20 +676,20 @@ class RewardDesignAgent:
         return summary
     
     def _simulate_training(self, codes: List[str]) -> List[Dict]:
-        """模拟训练结果（用于测试，阶段三将替换为真实训练）"""
+        """模拟训练结果（注入收敛特征用于测试）"""
         import random
-        
-        print("⚠️ 使用模拟训练数据（阶段三将替换为真实训练）")
-        
+
+        print("⚠️ 使用模拟训练数据")
+
         results = []
         for i, code in enumerate(codes):
-            # 模拟训练结果
             success_rate = random.uniform(0.6, 0.9)
             avg_time = random.uniform(40, 60)
-            
-            # 计算fitness
             fitness = success_rate - 0.001 * avg_time
-            
+
+            is_converged = random.choice([True, False])
+            f_mean = is_converged or random.choice([True, False])
+
             result = {
                 'id': i,
                 'code': code,
@@ -613,70 +706,19 @@ class RewardDesignAgent:
                     'collaboration_metrics': {
                         'encirclement_angle_std': {'mean': random.uniform(0.2, 0.5)},
                         'min_agent_distance': {'mean': random.uniform(0.2, 0.4)}
+                    },
+                    'convergence_status': {
+                        'f_mean': f_mean,
+                        'f_std': is_converged,
+                        'f_slope': f_mean,
+                        'is_converged': is_converged,
+                        'details': f"Mocked data - Converged: {is_converged}"
                     }
                 }
             }
-            
+
             results.append(result)
-            print(f"  候选 {i}: Fitness={fitness:.4f}, 成功率={success_rate:.2%}")
-        
+            print(f"  候选 {i}: Fitness={fitness:.4f}, 成功率={success_rate:.2%}, "
+                  f"收敛={is_converged}")
+
         return results
-
-
-# ========================================
-# 测试代码
-# ========================================
-if __name__ == "__main__":
-    print("测试奖励函数设计智能体（使用预定义环境上下文）...")
-    
-    # 注意：测试前需要设置API密钥环境变量
-    # export OPENAI_API_KEY=your_key
-    
-    try:
-        # 1. 初始化智能体（自动使用预定义上下文）
-        agent = RewardDesignAgent(config_path="llm_reward_agent/config/llm_config.yaml")
-        
-        # 2. 初始化任务（可选，如果不提供则使用预定义任务描述）
-        agent.initialize(
-            env_file_path=None,  # 不再需要
-            task_description=None  # 可选，如果不提供则使用 PREDEFINED_TASK_DESCRIPTION
-        )
-        
-        # 或者直接使用默认初始化（已在 __init__ 中完成）
-        # agent.initialize()
-        
-        # 3. 运行一代进化（使用模拟训练）
-        print("\n" + "=" * 80)
-        print("开始测试进化流程")
-        print("=" * 80)
-        
-        result = agent.step(generation=0, use_real_training=False)  # 使用模拟训练
-        
-        print("\n" + "=" * 80)
-        print("第0代进化完成")
-        print("=" * 80)
-        print(f"最优Fitness: {result['best_fitness']:.4f}")
-        print(f"反思: {result['reflection'][:200]}...")
-        
-        # 4. 运行第二代（测试进化）
-        result = agent.step(generation=1, use_real_training=False)
-        
-        print("\n" + "=" * 80)
-        print("第1代进化完成")
-        print("=" * 80)
-        print(f"最优Fitness: {result['best_fitness']:.4f}")
-        
-        # 5. 导出摘要
-        summary = agent.memory.export_summary()
-        print("\n" + summary)
-        
-        print("\n✅ 奖励函数设计智能体测试完成！")
-    
-    except Exception as e:
-        print(f"\n❌ 测试失败: {e}")
-        import traceback
-        traceback.print_exc()
-        print("\n提示：")
-        print("1. 请确保已设置API密钥环境变量")
-        print("2. 如果不想调用真实LLM，可以使用 use_real_training=False")
-        print("3. 环境上下文已预定义在 prompt_templates.py 中")

@@ -19,6 +19,16 @@ PREDEFINED_ENV_CONTEXT = {
     },
     "code_snippet": '''
 import numpy as np
+import gymnasium
+from gymnasium.utils import EzPickle
+
+from pettingzoo.mpe._mpe_utils.core import Agent, Landmark, World
+from pettingzoo.mpe._mpe_utils.scenario import BaseScenario
+from pettingzoo.mpe._mpe_utils.simple_env import SimpleEnv, make_env
+from pettingzoo.utils.conversions import parallel_wrapper_fn
+
+from .custom_agents_dynamics import CustomWorld
+from . import reward_function  # 可插拔的奖励函数（仅包含追捕者奖励）
 
 class CoreEnvLogic:
     """
@@ -125,420 +135,229 @@ class PromptTemplates:
 3. 考虑多智能体协同的特殊性（避免碰撞、形成队形等）
 4. 奖励分量要可解释、可调试
 """
-    
+
     @staticmethod
-    def initial_generation_prompt(env_context: Dict, task_description: str) -> str:
+    def reflection_prompt(training_logs: str) -> str:
         """
-        第一代生成提示词（Zero-Shot）
-        
-        Args:
-            env_context: 环境上下文信息
-            task_description: 任务描述
-        
-        Returns:
-            str: 完整提示词
+        DREAM 模块：带自适应算子分配的诊断反思提示词
+        强制 LLM 在输出诊断后，严格按规定格式输出下一代的算子分配方案。
         """
-        prompt = f"""你是一位专业的强化学习奖励工程师。请根据以下信息设计奖励函数。
+        prompt = f"""你是一位严谨的强化学习数据分析师。请分析以下训练日志，给出诊断报告，并为下一代的4个并行候选制定进化算子。
+
+# 训练日志
+{training_logs}
+
+# 可用变异算子说明（含适用场景）
+
+## F1 (分支扩充): 增加新的缺失奖励/惩罚机制
+适用场景：
+- 诊断发现存在明显的行为缺陷，但现有奖励分量中找不到任何相关引导（如缺少防碰撞惩罚、缺少包围鼓励、缺少边界约束等）
+- 需要引入全新的协同机制但又不想破坏现有有效设计
+- 现有奖励分量覆盖维度不足（如缺少速度引导、缺少朝向引导等）
+
+## F2 (分量重构): 重写当前失效或起反作用的奖励分量（改变其数学表达形式）
+适用场景：
+- 某分量统计均值长期为负或接近零，说明该设计在训练中未产生预期引导
+- 某分量的设计在训练中产生了反向效果（如鼓励包围反而导致分散）
+- 需要调整计算公式（线性→指数/双曲/高斯混合等）来改变稀疏性
+- 需要改变分量的稀疏特性（如将密集奖励改为稀疏里程碑奖励）
+
+## F3 (平衡微调): 仅修改现有各分量的权重系数
+适用场景：
+- 各分量设计本身基本合理，但权重配比失调（如成功奖励远小于失败惩罚）
+- 希望增加探索性（降低某些惩罚权重）或强化某类行为（提升某分量权重）
+- 训练中出现某种行为但需要微调强度而非改变方向
+- 只想保守调整，不想引入过多风险
+
+## L1 (范式跃迁): 彻底推翻重写
+适用场景：
+- 现有奖励设计从根本上是错误的（如完全忽略了围捕任务的核心目标）
+- 多次迭代（F1/F2/F3）后仍无法收敛，说明当前范式有系统性问题
+- 需要尝试完全不同的设计思路（如从局部贪婪改为全局势场）
+- 历史积累的修补导致代码结构混乱，需要从零重建
+
+# 任务要求
+1. **病理诊断**：详细分析哪些分量起主导作用，哪些失效或起反作用，以及是否存在协同缺陷。
+2. **算子分配**：基于诊断，为下一代的4个候选独立分配算子。
+   - **硬性约束**：【每种算子最多只能被选择 2 次】。
+
+# 算子分配示例
+
+## 示例一：F2+F3 为主（各选2次）
+```
+[算子分配]
+Candidate 0: F2
+Candidate 1: F3
+Candidate 2: F2
+Candidate 3: F3
+```
+适用：当需要同时重构失效分量（F2）和调整权重（F3）时，让各候选侧重不同方向。
+
+## 示例二：F1/F2/F3/L1 各1次
+```
+[算子分配]
+Candidate 0: F1
+Candidate 1: F2
+Candidate 2: F3
+Candidate 3: L1
+```
+适用：需要探索不同方向时，4种算子各选一个，最大限度保持多样性。
+
+## 示例三：F1出现2次 + F2+F3各1次
+```
+[算子分配]
+Candidate 0: F1
+Candidate 1: F2
+Candidate 2: F1
+Candidate 3: F3
+```
+适用：当诊断指出缺少关键机制（F1），同时需要适度重构（F2）和微调（F3）时。
+
+## 示例四：L1出现2次 + F2+F3各1次
+```
+[算子分配]
+Candidate 0: L1
+Candidate 1: F2
+Candidate 2: L1
+Candidate 3: F3
+```
+适用：当当前范式存在根本性问题时，激进候选选择L1重写，同时保留F2/F3保守调整。
+
+## 示例五：F1+F2+F3各1次 + 某算子重复
+```
+[算子分配]
+Candidate 0: F1
+Candidate 1: F2
+Candidate 2: F3
+Candidate 3: F2
+```
+适用：允许同一种算子（如F2）在不同候选中产生不同变体，增加局部搜索深度。
+
+# 强制输出格式（严格遵守，不要有多余文字）
+[病理诊断]
+(你的详细诊断内容)
+
+[算子分配]
+Candidate 0: <F1/F2/F3/L1>
+Candidate 1: <F1/F2/F3/L1>
+Candidate 2: <F1/F2/F3/L1>
+Candidate 3: <F1/F2/F3/L1>"""
+        return prompt
+
+    # ========================================
+    # 使用预定义环境上下文的方法
+    # ========================================
+
+    @staticmethod
+    def cot_analysis_prompt(task_description: str, env_context: Dict) -> str:
+        """
+        阶段一：思维链（CoT）环境解析提示词
+        强制LLM在生成代码前，对MDP模型和多智能体交互机理进行物理意义上的降维与对齐。
+        """
+        agent_info = env_context.get('agent_info', {})
+        code_snippet = env_context.get('code_snippet', '')
+
+        prompt = f"""你是一位资深多智能体强化学习（MARL）专家。在设计奖励函数前，你必须先对环境模型（Dec-POMDP）进行严格的代码级诊断。
 
 # 任务描述
 {task_description}
 
 # 环境信息
-- **环境名称**: {env_context.get('env_name', '未知')}
-- **观测空间**: {env_context.get('observation_space', '未知')}
-- **动作空间**: {env_context.get('action_space', '未知')}
+追捕者数量: {agent_info.get('num_adversaries', 3)}, 逃跑者数量: {agent_info.get('num_good', 1)}
 
-## 智能体信息
-"""
-        
-        # 添加智能体信息
-        agent_info = env_context.get('agent_info', {})
-        for key, val in agent_info.items():
-            prompt += f"- {key}: {val}\n"
-        
-        prompt += "\n## 物理参数\n"
-        
-        # 添加物理常量
-        constants = env_context.get('physical_constants', {})
-        for key, val in constants.items():
-            prompt += f"- {key}: {val}\n"
-        
-        # 添加代码片段（如果有）
-        code_snippet = env_context.get('code_snippet', '')
-        if code_snippet:
-            prompt += f"""
-## 环境代码片段（关键部分）
+核心逻辑代码：
 ```python
 {code_snippet}
 ```
+
+# 分析任务（必须按要求分步作答）
+
+请深呼吸，逐步回答以下五个维度的问题，以建立准确的环境状态表征：
+
+## 实现细节 (Implementation Details)
+- 环境代码使用了哪些依赖包？
+- 是否引入了外部未定义的变量？
+
+## 环境结构 (Environment Structure)
+- 状态空间 (Global State): global_state 字典中包含了哪些维度的信息？它们的物理意义是什么？
+- 观测空间 (Observation): 智能体的局部观测向量是如何拼接的？包含了哪些相对信息？
+
+## 智能体交互 (Agent Interactions)
+- 捕食者与猎物在物理属性（如 max_speed, size）上有何异同？
+- 环境中判定"成功捕获（Collision）"的数学和物理条件是什么？
+
+## 任务相关信息 (Task-relevant Information)
+- 围捕任务的核心目标与哪些变量直接挂钩（正相关/负相关）？
+- 怎样的空间拓扑（如智能体间的相对距离分布）代表形成了高质量的"包围圈"？
+
+## 任务相关信息 (Task-relevant Information)
+- 围捕任务的核心目标与哪些变量直接挂钩（正相关/负相关）？
+- 怎样的空间拓扑（如智能体间的相对距离分布）代表形成了高质量的"包围圈"？
+
+## API边界隔离 (API Boundaries)
+- **重要**：上方代码片段中的 `CoreEnvLogic` 类仅是**文档伪代码**，用于辅助理解物理概念，**绝非**可以在运行时被实例化的真实类。
+- 在真正的 `compute_reward` 函数中，**禁止**调用 `CoreEnvLogic()` 或访问 `world.logic`、`world.adversary_params` 等不存在的属性。
+- 如果需要物理常量（如 `size`、`max_speed`、`world_size` 等），必须在函数内部以**局部变量**的形式硬编码声明，例如：`adv_size = 0.075`。
+
+请仅输出上述五个维度的详细分析报告，**绝对不要编写任何奖励函数代码**。
 """
-        
-        # 添加函数签名和要求
-        prompt += """
-# 要求
-
-请实现 `compute_reward()` 函数，函数签名如下：
-
-```python
-def compute_reward(agent_name, observation, global_state, actions, world):
-    \"\"\"
-    可插拔的奖励函数接口
-    
-    Args:
-        agent_name (str): 当前智能体名称 (e.g., "adversary_0", "agent_0")
-        observation (np.ndarray): 当前智能体的观测向量
-        global_state (dict): 全局状态信息
-            {
-                'agent_positions': np.ndarray,       # shape: (n_agents, 2)
-                'agent_velocities': np.ndarray,      # shape: (n_agents, 2)
-                'prey_position': np.ndarray,         # shape: (2,)
-                'prey_velocity': np.ndarray,         # shape: (2,)
-                'distances_to_prey': np.ndarray,     # shape: (n_adversaries,)
-                'inter_agent_distances': np.ndarray, # shape: (n_agents, n_agents)
-                'is_adversary': bool,                # 当前智能体是否为追捕者
-                'adversary_indices': list,           # 所有追捕者的索引
-                'prey_indices': list,                # 所有逃跑者的索引
-                'world_size': float,                 # 世界大小
-                'capture_threshold': float,          # 围捕阈值
-            }
-        actions (dict): 所有智能体的动作 {{agent_name: action_vector}}
-        world (World): PettingZoo的World对象
-    
-    Returns:
-        reward (float): 标量奖励值
-        components (dict): 奖励分量字典（用于日志分析）
-    \"\"\"
-    # 你的代码实现
-    pass
-```
-
-## 设计要点
-
-1. **奖励分量必须是字典**，包含各个奖励分量（用于日志分析），例如：
-   ```python
-   components = {
-       'distance_reward': ..., 
-       'collision_penalty': ..., 
-       'formation_reward': ...,
-       'boundary_penalty': ...
-   }
-   ```
-
-2. **只设计追捕者的奖励函数**（逃跑者的奖励函数已固定）：
-   - 在函数内部通过 `if global_state['is_adversary']` 判断当前是否为追捕者
-   - 如果不是追捕者（逃跑者），返回0
-
-3. **追捕者奖励函数设计要点**：
-   - ✅ 鼓励智能体接近并围捕目标
-   - ✅ 惩罚智能体之间的碰撞
-   - ✅ 奖励形成均匀的包围圈
-   - ✅ 惩罚越界行为
-   - ✅ 适当惩罚能耗（可选）
-
-4. **只输出Python代码**，不要有任何额外解释。代码需要符合PEP8规范。
-
-5. **必须导入numpy**: 在代码开头加上 `import numpy as np`
-
-# 输出格式
-
-只输出完整的Python代码，使用以下格式：
-
-```python
-import numpy as np
-
-def compute_reward(agent_name, observation, global_state, actions, world):
-    components = {{}}
-    
-    # 你的代码实现
-    # ...
-    
-    total_reward = sum(components.values())
-    return total_reward, components
-```
-
-**注意**：不要输出任何解释性文字，只输出代码块。
-"""
-        
         return prompt
-    
+
     @staticmethod
-    def evolution_prompt(env_context: Dict, 
-                        task_description: str, 
-                        parent_code: str, 
-                        reflection: str,
-                        n_candidates: int = 4) -> str:
+    def initial_generation_prompt_with_cot(
+        task_description: str,
+        env_context: Dict,
+        cot_analysis_result: str
+    ) -> str:
         """
-        进化生成提示词（基于上一代的改进）
-        
-        Args:
-            env_context: 环境上下文信息
-            task_description: 任务描述
-            parent_code: 上一代最优代码
-            reflection: 上一代的训练反思
-            n_candidates: 需要生成的候选数量
-        
-        Returns:
-            str: 完整提示词
+        阶段二：基于CoT先验的独立生成提示词
         """
-        prompt = f"""你是一位专业的强化学习奖励工程师。基于上一代的训练反馈，改进奖励函数。
+        code_snippet = env_context.get('code_snippet', '')
+
+        prompt = f"""你是一位专业的强化学习奖励工程师。请基于之前的环境诊断分析，编写符合要求的奖励函数。
 
 # 任务描述
 {task_description}
 
-# 环境信息（简要）
-- 观测空间: {env_context.get('observation_space', '未知')}
-- 动作空间: {env_context.get('action_space', '未知')}
-- 智能体数量: {env_context.get('agent_info', {}).get('num_adversaries', '未知')} 个追捕者, {env_context.get('agent_info', {}).get('num_good', '未知')} 个逃跑者
+# 先验环境诊断分析
+{cot_analysis_result}
 
-# 上一代最优代码
-
+# 环境代码参考
 ```python
-{parent_code}
+{code_snippet}
 ```
 
-# 训练反馈与反思
+# 接口规范要求
 
-{reflection}
-
-# 改进要求
-
-基于上述反思，对代码进行修改，生成 **{n_candidates} 个不同的变体（Mutation）**。
-
-## 特殊指导：关于重构奖励函数
-
-如果反思中指出需要**完全重构**奖励函数（即当前奖励函数存在根本性问题，捕获成功率持续为0或完全无法完成任务），请：
-
-- 从零开始设计全新的奖励函数，而不是在原有基础上修补
-- 可以尝试完全不同的奖励机制（如势场函数、启发式规则、距离变换等）
-- 保持函数签名不变，但内部逻辑可以完全重写
-- 每个变体应有明显差异
-
-每个变体应该：
-1. 基于上一代代码进行改进
-2. 针对反思中提到的问题进行调整：
-   - 调整权重系数（增大/减小某些分量的权重）
-   - 增加/删除奖励项
-   - 改变函数形式（线性 → 指数 / 分段函数 / 势场函数等）
-3. 每个变体应有明显差异（不要只是微调权重）
-4. 保持代码的可读性和可解释性
-
-## 变体生成策略建议
-
-- **变体0**: 保守改进（微调权重，保持结构）
-- **变体1**: 激进改进（大幅调整权重或函数形式）
-- **变体2**: 添加新的奖励分量
-- **变体3**: 简化奖励函数（删除不重要的分量）
-
-# 输出格式
-
-输出 {n_candidates} 个完整的Python代码块，每个代码块之间用注释 `# === VARIANT {{i}} ===` 分隔。
-
-示例：
-
-```python
-# === VARIANT 0 ===
-import numpy as np
-
-def compute_reward(agent_name, observation, global_state, actions, world):
-    components = {{}}
-    # ... 变体0的实现 ...
-    total_reward = sum(components.values())
-    return total_reward, components
-
-# === VARIANT 1 ===
-import numpy as np
-
-def compute_reward(agent_name, observation, global_state, actions, world):
-    components = {{}}
-    # ... 变体1的实现 ...
-    total_reward = sum(components.values())
-    return total_reward, components
-
-# === VARIANT 2 ===
-import numpy as np
-
-def compute_reward(agent_name, observation, global_state, actions, world):
-    components = {{}}
-    # ... 变体2的实现 ...
-    total_reward = sum(components.values())
-    return total_reward, components
-
-# === VARIANT 3 ===
-import numpy as np
-
-def compute_reward(agent_name, observation, global_state, actions, world):
-    components = {{}}
-    # ... 变体3的实现 ...
-    total_reward = sum(components.values())
-    return total_reward, components
-```
-
-**注意**：
-1. 只输出代码，不要有任何额外解释
-2. 每个变体必须是完整的、可独立运行的函数
-3. 确保代码语法正确，符合PEP8规范
-"""
-        
-        return prompt
-    
-    @staticmethod
-    def reflection_prompt(training_logs: str) -> str:
-        """
-        生成反思提示词（Reward Reflection）
-        
-        Args:
-            training_logs: 格式化后的训练日志
-        
-        Returns:
-            str: 反思提示词
-        """
-        prompt = f"""你是一位专业的强化学习研究员。请分析以下训练日志，总结奖励函数的表现。
-
-# 训练日志
-
-{training_logs}
-
-# 分析要求
-
-请从以下四个维度进行分析：
-
-## 1. 奖励分量诊断
-
-- 哪些分量起到了作用（数值非零且有方差）？
-- 哪些分量失效了（一直为0或数值异常）？
-- 各分量的数值范围是否合理？
-- 各分量的权重配比是否平衡？
-
-## 2. 任务性能分析
-
-- 成功率是否达标（目标：>0.8）？
-- 捕获时间是否合理（越短越好）？
-- 是否存在明显的失败模式？
-- 训练是否收敛（从日志趋势判断）？
-
-## 3. 协同行为评估
-
-- 智能体是否学会了均匀包围（从角度标准差判断）？
-- 是否出现碰撞或扎堆现象（从最小距离判断）？
-- 队形质量是否提高？
-- 是否出现"搭便车"现象（某些智能体不工作）？
-
-## 4. 改进建议（针对下一代）
-
-基于以上分析，提出具体的改进措施：
-
-- 需要增加哪些奖励项？（用于引导缺失的行为）
-- 需要删除哪些奖励项？（失效或干扰的分量）
-- 需要调整哪些权重系数？（增大/减小具体数值）
-- 需要改变哪些函数形式？（线性→非线性，添加阈值等）
-
-## 5. 重构评估
-
-请判断当前奖励函数是否需要**完全重构**，而非仅仅调整参数：
-
-**需要重构的信号**：
-- 捕获成功率持续为0，完全无法完成任务
-- 训练过程中奖励没有变化，智能体学不到任何东西
-- 奖励分量为0或异常（说明奖励函数逻辑有严重问题）
-- 智能体行为完全异常（如一直不动、一直朝边界跑、疯狂碰撞等）
-
-**如果判定需要重构**，请明确指出：
-1. 当前奖励函数存在的根本性问题是什么
-2. 需要采用什么全新的奖励策略（可以从零开始设计）
-3. 建议的全新奖励函数核心思路
-
-**如果不需要重构**，则继续进行参数优化和微调。
-
-# 输出格式
-
-使用自然语言，分点总结，清晰明了。总字数控制在500字以内。
-
-示例输出：
-
-**奖励分量诊断**：
-- distance_reward工作正常，均值-1.23，引导智能体接近目标
-- collision_penalty基本失效，均值接近0，说明智能体很少碰撞或惩罚不够明显
-- formation_reward方差很小，可能权重过低或触发条件过严
-
-**任务性能分析**：
-- 成功率75%，尚未达标，需要进一步优化
-- 平均捕获时间48步，处于中等水平
-- 主要失败模式：智能体在圈外徘徊，不敢进圈
-
-**协同行为评估**：
-- 角度标准差0.34，包围不够均匀，存在扎堆现象
-- 最小智能体距离0.25，接近碰撞阈值，需要更强的排斥力
-- 队形质量0.56，有改进空间
-
-**改进建议**：
-1. 增大进圈奖励的权重（当前-2.0 → -3.0），鼓励更激进的接近
-2. 降低角度排斥的权重（当前5.0 → 2.0），避免过度排斥导致不敢进圈
-3. 添加"全员进圈"的额外奖励，强化协同
-4. 调整碰撞惩罚的阈值（当前0.2 → 0.3），给予更多容错空间
-
-**重构评估**：
-- 当前奖励函数工作正常，不需要重构
-- 奖励分量设计合理，各项都能发挥作用
-
-或（如果需要重构）：
-
-**重构评估**：
-- 需要重构。当前奖励函数存在根本性问题：捕获成功率持续为0，奖励分量为0，智能体完全学不到任何东西
-- 建议从零开始设计全新的奖励函数，采用势场方法直接引导智能体包围目标
-- 核心思路：使用多个势场叠加（吸引势场+包围势场+防撞势场）
-"""
-        
-        return prompt
-    
-    @staticmethod
-    def code_fix_prompt(broken_code: str, error_message: str) -> str:
-        """
-        代码修复提示词
-        
-        Args:
-            broken_code: 有问题的代码
-            error_message: 错误信息
-        
-        Returns:
-            str: 修复提示词
-        """
-        prompt = f"""请修复以下Python代码中的错误。
-
-# 错误的代码
-
-```python
-{broken_code}
-```
-
-# 错误信息
-
-```
-{error_message}
-```
-
-# 要求
-
-1. 修复代码中的语法错误或逻辑错误
-2. 保持代码的原有功能和逻辑
-3. 确保符合函数签名要求
-4. 只输出修复后的完整代码，不要有任何解释
-
-# 输出格式
+请实现 compute_reward 函数，严格遵守以下签名与返回格式：
 
 ```python
 import numpy as np
 
 def compute_reward(agent_name, observation, global_state, actions, world):
-    # 修复后的代码
-    pass
+    # 必须通过 global_state['is_adversary'] 过滤逃跑者
+    if not global_state['is_adversary']:
+        return 0.0, {{}}
+
+    components = {{}}
+
+    # 你的核心逻辑实现 (必须包含距离引导、防碰撞、包围队形等分量)
+    # components['distance_reward'] = ...
+
+    total_reward = sum(components.values())
+    return total_reward, components
 ```
+
+# 关键约束
+- 奖励分量字典 components 必须保留，以便后续日志做信用分配分析
+- 确保所使用的字典键值在 global_state 中真实存在
+- **禁止实例化伪类**：绝对禁止在代码中写出 `CoreEnvLogic()`！上方的代码片段仅是背景文档，运行时环境中根本不存在这个类。
+- **禁止虚构属性**：绝对禁止调用 `world.logic`、`world.adversary_params` 等不存在的属性。
+- **物理常量硬编码**：如果需要使用物理参数（如智能体的 `size=0.075`、地图大小 `world_size=2.5` 等），必须直接在 `compute_reward` 函数内部以局部变量的形式硬编码声明（例如：`adv_size = 0.075`）。
+- 只允许输出1个Python代码块，**严禁包含任何解释性文字或Markdown说明**，直接以 ```python 开头
 """
         return prompt
-    
-    # ========================================
-    # 使用预定义环境上下文的方法
-    # ========================================
-    
+
     @staticmethod
     def initial_generation_prompt_with_predefined_context(
         task_description: str = PREDEFINED_TASK_DESCRIPTION,
@@ -664,6 +483,78 @@ def compute_reward(agent_name, observation, global_state, actions, world):
         return prompt
     
     @staticmethod
+    def evoleap_prompt(
+        operator_type: str,
+        task_description: str,
+        parent_code: str,
+        reflection: str,
+        env_context: Dict
+    ) -> str:
+        """
+        EvoLeap 强约束四向变异算子
+
+        Args:
+            operator_type: 变异算子类型 ('F1', 'F2', 'F3', 'L1')
+            task_description: 任务描述
+            parent_code: 上一代最优代码
+            reflection: 客观诊断反馈
+            env_context: 环境上下文
+
+        Returns:
+            str: 完整提示词
+        """
+        code_snippet = env_context.get('code_snippet', '')
+
+        # 定义四向变异策略
+        strategies = {
+            'F1': '【Reward Branch Augmentation (分支扩充)】\n请完全保留原代码的现有逻辑和权重，新增一个（且仅新增一个）奖励或惩罚分量，用于解决诊断报告中缺失的协同行为引导。',
+            'F2': '【Reward Component Reconstruction (失效分量重构)】\n请定位诊断报告中指出的"失效"或"起反作用"的分量。不要直接删除它们，而是重构其数学逻辑（例如：将线性惩罚改为指数惩罚、引入平滑阈值或改变距离函数的计算方式）。保持其他有效分量不变。',
+            'F3': '【Reward Equilibrium Tuning (平衡微调)】\n绝对不要增加或删除现有的逻辑分支！请严格保持代码拓扑不变，仅根据诊断报告，修改各奖励分量的权重系数（增大/减小）。',
+            'L1': '【Reward Paradigm Leap (范式跃迁)】\n彻底抛弃原代码的设计思路！请从零开始构建一个全新的奖励函数（例如尝试全局势场、相对距离极坐标系等与原先完全不同的视角）。'
+        }
+
+        constraint = strategies.get(operator_type, strategies['F3'])
+
+        prompt = f"""你是一位专业的强化学习奖励工程师。请基于上一代的诊断反馈执行特定的变异操作。
+
+# 环境基座
+{code_snippet}
+
+# 上一代最优代码
+```python
+{parent_code}
+```
+
+# 客观诊断反馈
+{reflection}
+
+# 强制变异指令
+{constraint}
+
+# 接口规范
+请实现 compute_reward 函数，保持接口签名不变：
+
+```python
+import numpy as np
+
+def compute_reward(agent_name, observation, global_state, actions, world):
+    if not global_state['is_adversary']: return 0.0, {{}}
+    components = {{}}
+    # [根据变异指令修改这里的核心逻辑]
+    total_reward = sum(components.values())
+    return total_reward, components
+```
+
+只允许输出1个Python代码块，严禁任何解释性文字，直接以 ```python 开头。
+
+# 致命红线约束 (Anti-Hallucination Guardrails)
+- **禁止引入外部依赖或未定义的类**：绝不可实例化 `CoreEnvLogic()` 或尝试访问 `world.logic`、`world.adversary_params` 等不存在属性。
+- **物理常量硬编码**：若要新增依赖于物理常量的逻辑（如体积、速度），必须直接在函数内写死数值常量（如 `adv_size = 0.075`）。
+- **严格保持接口签名**：必须保留 `components` 字典收集机制并返回 `total_reward, components`。
+- 只允许输出1个修改后的Python代码块，严禁任何解释性文字，直接以 ```python 开头。"""
+        return prompt
+
+    @staticmethod
     def evolution_prompt_with_predefined_context(
         task_description: str = PREDEFINED_TASK_DESCRIPTION,
         parent_code: str = "",
@@ -746,50 +637,11 @@ def compute_reward(agent_name, observation, global_state, actions, world):
     total_reward = sum(components.values())
     return total_reward, components
 ```
+
+# 致命红线约束 (Anti-Hallucination Guardrails)
+- **禁止实例化伪类**：绝对禁止在代码中写出 `CoreEnvLogic()`！上方的代码片段仅是背景文档，运行时环境中根本不存在这个类。
+- **禁止虚构属性**：绝对禁止调用 `world.logic`、`world.adversary_params` 等不存在的属性。
+- **物理常量硬编码**：如果需要使用物理参数（如智能体的 `size=0.075`、地图大小 `world_size=2.5` 等），必须直接在函数内部以局部变量的形式硬编码声明。
 """
 
         return prompt
-
-
-# ========================================
-# 测试代码
-# ========================================
-if __name__ == "__main__":
-    print("测试提示词模板...")
-    
-    # 测试使用预定义上下文的方法
-    print("\n=== 测试使用预定义上下文的方法 ===")
-    predefined_prompt = PromptTemplates.initial_generation_prompt_with_predefined_context()
-    print(f"提示词长度: {len(predefined_prompt)} 字符")
-    print(f"前800字符:\n{predefined_prompt[:800]}...")
-    print("\n" + "="*80)
-    
-    # 测试进化提示词
-    test_parent_code = """
-import numpy as np
-
-def compute_reward(agent_name, observation, global_state, actions, world):
-    components = {{}}
-    dist = np.linalg.norm(global_state['agent_positions'][0] - global_state['prey_position'])
-    components['distance_reward'] = -dist
-    total_reward = sum(components.values())
-    return total_reward, components
-"""
-    
-    test_reflection = """
-成功率较低（60%），主要问题是智能体扎堆。
-建议：增加角度排斥力，鼓励均匀分布。
-"""
-    
-    print("\n=== 测试进化提示词（使用预定义上下文）===")
-    evolution_prompt = PromptTemplates.evolution_prompt_with_predefined_context(
-        parent_code=test_parent_code,
-        reflection=test_reflection,
-        n_candidates=4
-    )
-    print(f"提示词长度: {len(evolution_prompt)} 字符")
-    print(f"前800字符:\n{evolution_prompt[:800]}...")
-    
-    print("\n" + "="*80)
-    print("✅ 预定义上下文提示词测试完成！")
-    print("="*80)

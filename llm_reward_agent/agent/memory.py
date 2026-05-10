@@ -39,24 +39,29 @@ class EvolutionaryMemory:
         
         print(f"✅ 进化记忆初始化完成: {save_dir}")
     
-    def save(self, 
-             generation: int, 
-             best_code: str, 
-             reflection: str, 
+    def save(self,
+             generation: int,
+             best_code: str,
+             reflection: str,
              all_results: List[Dict],
+             selected_fitness: float = None,  # 【新增参数】降级选拔后的真实适应度
              metadata: Optional[Dict] = None):
         """
         保存一代的记录
-        
+
         Args:
             generation: 代数
             best_code: 本代最优代码
             reflection: 反思内容
             all_results: 所有候选的结果列表
+            selected_fitness: 【新增】降级选拔算法选定的真实适应度（优先使用）
             metadata: 额外的元数据
         """
-        # 计算最优fitness
-        best_fitness = max(r.get('fitness', -float('inf')) for r in all_results)
+        # 【重点修改】：优先使用传入的过滤后 fitness，而不是盲目取 max
+        if selected_fitness is not None:
+            best_fitness = selected_fitness
+        else:
+            best_fitness = max(r.get('fitness', -float('inf')) for r in all_results)
         
         # 创建记录
         record = {
@@ -244,62 +249,36 @@ class EvolutionaryMemory:
     
     def plot_evolution_curve(self, save_path: Optional[str] = None):
         """
-        绘制进化曲线
-        
+        绘制进化曲线（委托给 visualization.evolution_plot.EvolutionPlotter）
+
         Args:
             save_path: 图片保存路径
         """
-        try:
-            import matplotlib.pyplot as plt
-            import numpy as np
-        except ImportError:
-            print("⚠️ matplotlib未安装，无法绘制曲线")
-            return
-        
         if not self.history:
             print("⚠️ 没有数据可绘制")
             return
-        
-        # 提取数据
-        generations = list(range(len(self.history)))
-        best_fitness = [record['best_fitness'] for record in self.history]
-        
-        # 计算平均fitness
-        avg_fitness = []
-        for record in self.history:
-            all_results = record.get('all_results', [])
-            if all_results:
-                avg = np.mean([r.get('fitness', 0) for r in all_results])
-                avg_fitness.append(avg)
-            else:
-                avg_fitness.append(0)
-        
-        # 绘图
-        plt.figure(figsize=(10, 6))
-        plt.plot(generations, best_fitness, 'o-', label='Best Fitness', linewidth=2, markersize=8)
-        plt.plot(generations, avg_fitness, 's--', label='Average Fitness', linewidth=2, markersize=6, alpha=0.7)
-        
-        # 标记最优点
-        best_gen = self.metadata.get('best_generation', -1)
-        if best_gen >= 0:
-            plt.scatter([best_gen], [best_fitness[best_gen]], 
-                       c='red', s=200, marker='*', zorder=5, label='Best Ever')
-        
-        plt.xlabel('Generation', fontsize=14)
-        plt.ylabel('Fitness', fontsize=14)
-        plt.title('Evolution Curve of Reward Function Design', fontsize=16, fontweight='bold')
-        plt.legend(fontsize=12)
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        
-        # 保存或显示
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"✅ 进化曲线已保存到: {save_path}")
-        else:
-            plt.show()
-        
-        plt.close()
+
+        if save_path is None:
+            save_path = os.path.join(self.save_dir, "evolution_curve.png")
+
+        try:
+            # ============================================================
+            # 【关键修复】在导入matplotlib相关模块之前，设置后端为Agg
+            # 避免Windows下tkinter错误: RuntimeError: main thread is not in main loop
+            # ============================================================
+            os.environ.setdefault('MPLBACKEND', 'Agg')
+            os.environ.setdefault('TK_SILENCE_IGNORE', '1')
+            import matplotlib
+            matplotlib.use('Agg', force=True)
+            # ============================================================
+
+            from visualization.evolution_plot import EvolutionPlotter
+            plotter = EvolutionPlotter(archive_dir=self.save_dir)
+            plotter.plot_evolution_curve(save_path=save_path)
+        except ImportError:
+            print("⚠️ 可视化模块不可用，跳过绘图")
+        except Exception as e:
+            print(f"⚠️ 绘图失败: {e}")
     
     def clear(self):
         """清空所有历史数据"""
@@ -311,70 +290,3 @@ class EvolutionaryMemory:
             'best_generation': -1
         }
         print("✅ 记忆已清空")
-
-
-# ========================================
-# 测试代码
-# ========================================
-if __name__ == "__main__":
-    print("测试进化记忆管理...")
-    
-    # 创建记忆实例
-    memory = EvolutionaryMemory(save_dir="test_logs/evolution_test")
-    
-    # 模拟保存3代数据
-    for gen in range(3):
-        test_code = f"""
-import numpy as np
-
-def compute_reward(agent_name, observation, global_state, actions, world):
-    components = {{}}
-    # 第{gen}代的实现
-    components['distance_reward'] = -{gen + 1} * 0.1
-    total_reward = sum(components.values())
-    return total_reward, components
-"""
-        
-        test_reflection = f"第{gen}代的反思：需要调整权重，改进队形..."
-        
-        test_results = [
-            {'id': 0, 'fitness': 0.6 + gen * 0.1, 'success_rate': 0.7},
-            {'id': 1, 'fitness': 0.65 + gen * 0.1, 'success_rate': 0.75},
-            {'id': 2, 'fitness': 0.7 + gen * 0.1, 'success_rate': 0.8},
-            {'id': 3, 'fitness': 0.55 + gen * 0.1, 'success_rate': 0.65},
-        ]
-        
-        memory.save(
-            generation=gen,
-            best_code=test_code,
-            reflection=test_reflection,
-            all_results=test_results
-        )
-    
-    print("\n" + "=" * 80)
-    
-    # 测试获取功能
-    print("\n=== 测试获取功能 ===")
-    print(f"第0代最优代码（前100字符）:\n{memory.get_best_code(0)[:100]}...")
-    print(f"\n第1代反思:\n{memory.get_reflection(1)}")
-    
-    print(f"\n历史最优:\n第{memory.get_best_ever()['generation']}代, Fitness={memory.get_best_ever()['best_fitness']:.4f}")
-    
-    print(f"\nFitness历史: {memory.get_fitness_history()}")
-    
-    # 导出摘要
-    print("\n=== 导出摘要 ===")
-    summary = memory.export_summary(filepath="test_logs/evolution_summary.txt")
-    print(summary[:500] + "...")
-    
-    # 绘制曲线（如果有matplotlib）
-    print("\n=== 绘制进化曲线 ===")
-    memory.plot_evolution_curve(save_path="test_logs/evolution_curve.png")
-    
-    # 测试加载
-    print("\n=== 测试加载 ===")
-    new_memory = EvolutionaryMemory(save_dir="test_logs/evolution_test")
-    new_memory.load_from_disk()
-    print(f"加载的历史记录数: {len(new_memory.history)}")
-    
-    print("\n✅ 进化记忆管理测试完成！")

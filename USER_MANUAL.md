@@ -197,6 +197,8 @@ python run_evolution.py --num_generations 10 --episode_num 200 --max_workers 4
 --num_generations <int>      # 进化代数（默认: 5）
 --use_real_training          # 使用真实训练（默认开启）
 --no-real-training           # 使用模拟训练
+--resume                     # 从已有历史继续训练（新增）
+--archive_dir <path>         # 进化记录目录（默认: experiments/evolution_archive）
 ```
 
 #### 训练参数
@@ -210,7 +212,7 @@ python run_evolution.py --num_generations 10 --episode_num 200 --max_workers 4
 
 ```bash
 --env_file <path>            # 环境文件路径
---task_description <str>     # 任务描述
+--task_description <str>      # 任务描述
 ```
 
 #### 保存参数

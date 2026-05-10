@@ -388,6 +388,49 @@ return np.concatenate([norm_self_vel] + [norm_self_pos] + entity_pos + other_pos
 
         return '\n'.join(lines)
 
+    def extract_skeleton(self, env_file_path: str) -> Dict[str, Any]:
+        """
+        提取环境代码骨架。
+
+        Args:
+            env_file_path: 环境文件路径
+
+        Returns:
+            dict: 环境上下文信息
+        """
+        runtime_info = self.get_runtime_info()
+
+        return {
+            "env_name": os.path.basename(env_file_path).replace('.py', ''),
+            "file_path": env_file_path,
+            "runtime_info": runtime_info,
+            "cleaned_code": self.clean_code_with_ast()
+        }
+
+    def format_for_llm(self, context: Dict) -> str:
+        """
+        格式化上下文信息为LLM友好的文本。
+
+        Args:
+            context: 环境上下文字典
+
+        Returns:
+            str: 格式化后的文本
+        """
+        return self.generate_prompt_context()
+
+    def estimate_token_count(self, text: str) -> int:
+        """
+        估算文本的Token数量。
+
+        Args:
+            text: 输入文本
+
+        Returns:
+            int: 估计的Token数量
+        """
+        return len(text) // 4
+
     def extract_key_methods(self) -> Dict[str, str]:
         """
         提取关键方法的代码
@@ -447,126 +490,15 @@ return np.concatenate([norm_self_vel] + [norm_self_pos] + entity_pos + other_pos
 
 class EnvironmentContextExtractor(LLMFriendlyContextExtractor):
     """
-    兼容性包装类 - 保持原有接口
+    便捷入口类 - 使用默认环境文件。
 
-    向后兼容原有代码，同时提供新功能
+    注意：当前 Agent 已改用预定义的 PREDEFINED_ENV_CONTEXT，
+    此类仅用于演示、测试或需要动态提取的场景。
     """
 
     def __init__(self):
-        # 查找默认环境文件
         default_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
             'envs', 'simple_tag_env.py'
         )
         super().__init__(default_path)
-
-    def extract_skeleton(self, env_file_path: str) -> Dict[str, Any]:
-        """
-        提取环境代码骨架（原有接口）
-
-        Args:
-            env_file_path: 环境文件路径
-
-        Returns:
-            dict: 环境上下文信息
-        """
-        # 使用运行时信息
-        runtime_info = self.get_runtime_info()
-
-        return {
-            "env_name": os.path.basename(env_file_path).replace('.py', ''),
-            "file_path": env_file_path,
-            "runtime_info": runtime_info,
-            "cleaned_code": self.clean_code_with_ast()
-        }
-
-    def format_for_llm(self, context: Dict) -> str:
-        """
-        格式化上下文信息为LLM友好的文本（原有接口）
-
-        Args:
-            context: 环境上下文字典
-
-        Returns:
-            str: 格式化后的文本
-        """
-        return self.generate_prompt_context()
-
-    def estimate_token_count(self, text: str) -> int:
-        """
-        估算文本的Token数量
-
-        Args:
-            text: 输入文本
-
-        Returns:
-            int: 估计的Token数量
-        """
-        return len(text) // 4
-
-
-# ========================================
-# 测试代码
-# ========================================
-if __name__ == "__main__":
-    print("=" * 80)
-    print("Testing LLMFriendlyContextExtractor")
-    print("=" * 80)
-
-    # 查找测试文件
-    search_paths = [
-        "MADDPG/envs/simple_tag_env.py",
-        "../MADDPG/envs/simple_tag_env.py",
-        "../../MADDPG/envs/simple_tag_env.py",
-        os.path.join(os.path.dirname(__file__), "../../MADDPG/envs/simple_tag_env.py"),
-        os.path.join(os.path.dirname(os.path.dirname(__file__)), "MADDPG/envs/simple_tag_env.py"),
-    ]
-
-    test_file = None
-    for path in search_paths:
-        if os.path.exists(path):
-            test_file = path
-            break
-
-    if test_file:
-        print(f"\nUsing test file: {test_file}")
-
-        # 创建提取器
-        extractor = LLMFriendlyContextExtractor(test_file)
-
-        print(f"\n[1/3] Testing runtime info extraction...")
-        runtime_info = extractor.get_runtime_info()
-        if "error" not in runtime_info:
-            print(f"  [OK] Runtime info extracted successfully")
-            print(f"  Environment class: {runtime_info.get('env_class_name')}")
-            print(f"  Agents: {runtime_info.get('agents')}")
-        else:
-            print(f"  [FAIL] {runtime_info['error']}")
-
-        print(f"\n[2/3] Testing code cleaning...")
-        cleaned = extractor.clean_code_with_ast()
-        if "error" not in cleaned:
-            print(f"  [OK] Code cleaning successful (lines: {cleaned.count(chr(10))+1})")
-        else:
-            print(f"  [FAIL] {cleaned}")
-
-        print(f"\n[3/3] Testing full context generation...")
-        full_context = extractor.generate_prompt_context()
-        if "error" not in full_context:
-            print(f"  [OK] Context generated (characters: {len(full_context)})")
-            # 保存到文件
-            output_file = "env_context_output.txt"
-            with open(output_file, 'w', encoding='utf-8') as f:
-                f.write(full_context)
-            print(f"  Saved to: {output_file}")
-        else:
-            print(f"  [FAIL] {full_context}")
-
-        print("\n" + "=" * 80)
-        print("Test completed!")
-        print("=" * 80)
-    else:
-        print("Test file not found: simple_tag_env.py")
-        print("\nSearch paths:")
-        for path in search_paths:
-            print(f"  - {path} (exists: {os.path.exists(path)})")

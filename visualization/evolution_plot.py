@@ -10,13 +10,31 @@ Version: 1.0
 import os
 import json
 import numpy as np
+
+# ============================================================
+# 【关键修复】在导入matplotlib之前设置后端为Agg
+# 避免Windows下tkinter错误: RuntimeError: main thread is not in main loop
+# ============================================================
+os.environ.setdefault('MPLBACKEND', 'Agg')
+os.environ.setdefault('TK_SILENCE_IGNORE', '1')
+
+import matplotlib
+# 强制使用Agg后端
+matplotlib.use('Agg', force=True)
+
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
 from typing import List, Dict, Optional
 
 
-# 设置中文字体（避免中文乱码）
-rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']  # 黑体
+# 设置中文字体（避免中文乱码；Windows 常见为 Microsoft YaHei）
+rcParams['font.sans-serif'] = [
+    'Microsoft YaHei',
+    'SimHei',
+    'PingFang SC',
+    'Noto Sans CJK SC',
+    'DejaVu Sans',
+]
 rcParams['axes.unicode_minus'] = False  # 正常显示负号
 
 
@@ -102,19 +120,19 @@ class EvolutionPlotter:
         # 绘图
         plt.figure(figsize=(10, 6))
         
-        plt.plot(gen_nums, best_fitness, 'o-', label='Best Fitness', 
+        plt.plot(gen_nums, best_fitness, 'o-', label='最优适应度',
                 linewidth=2, markersize=8, color='#2E86AB')
-        plt.plot(gen_nums, avg_fitness, 's--', label='Average Fitness', 
+        plt.plot(gen_nums, avg_fitness, 's--', label='平均适应度',
                 linewidth=2, markersize=6, alpha=0.7, color='#A23B72')
         
         # 标记最优点
         best_gen = np.argmax(best_fitness)
-        plt.scatter([best_gen], [best_fitness[best_gen]], 
-                   c='red', s=200, marker='*', zorder=5, label='Best Ever')
+        plt.scatter([best_gen], [best_fitness[best_gen]],
+                   c='red', s=200, marker='*', zorder=5, label='历史最优')
         
-        plt.xlabel('Generation', fontsize=14, fontweight='bold')
-        plt.ylabel('Fitness', fontsize=14, fontweight='bold')
-        plt.title('Evolution Curve of Reward Function Design', 
+        plt.xlabel('代数', fontsize=14, fontweight='bold')
+        plt.ylabel('适应度', fontsize=14, fontweight='bold')
+        plt.title('奖励函数设计演化曲线',
                  fontsize=16, fontweight='bold', pad=20)
         plt.legend(fontsize=12, loc='best')
         plt.grid(True, alpha=0.3, linestyle='--')
@@ -149,7 +167,7 @@ class EvolutionPlotter:
         plt.figure(figsize=(12, 6))
         
         bp = plt.boxplot(fitness_data, 
-                        labels=[f'Gen{i}' for i in range(len(fitness_data))],
+                        labels=[f'第{i}代' for i in range(len(fitness_data))],
                         patch_artist=True,
                         showmeans=True)
         
@@ -158,15 +176,15 @@ class EvolutionPlotter:
             patch.set_facecolor('#A8DADC')
             patch.set_alpha(0.7)
         
-        plt.xlabel('Generation', fontsize=14, fontweight='bold')
-        plt.ylabel('Fitness', fontsize=14, fontweight='bold')
-        plt.title('Fitness Distribution Across Generations', 
+        plt.xlabel('代数', fontsize=14, fontweight='bold')
+        plt.ylabel('适应度', fontsize=14, fontweight='bold')
+        plt.title('各代适应度分布', 
                  fontsize=16, fontweight='bold', pad=20)
         plt.grid(True, alpha=0.3, axis='y', linestyle='--')
         plt.tight_layout()
         
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Fitness分布图已保存到: {save_path}")
+        print(f"适应度分布图已保存到: {save_path}")
         plt.close()
     
     def plot_success_rate_comparison(self, save_path: str = "success_rate_comparison.png"):
@@ -210,12 +228,12 @@ class EvolutionPlotter:
             z = np.polyfit(gen_nums, success_rates, 2)
             p = np.poly1d(z)
             x_smooth = np.linspace(min(gen_nums), max(gen_nums), 100)
-            plt.plot(x_smooth, p(x_smooth), "r--", alpha=0.8, linewidth=2, label='Trend')
+            plt.plot(x_smooth, p(x_smooth), "r--", alpha=0.8, linewidth=2, label='趋势线')
         
-        plt.xlabel('Generation', fontsize=14, fontweight='bold')
-        plt.ylabel('Success Rate', fontsize=14, fontweight='bold')
-        plt.title('Success Rate Evolution', fontsize=16, fontweight='bold', pad=20)
-        plt.colorbar(label='Generation')
+        plt.xlabel('代数', fontsize=14, fontweight='bold')
+        plt.ylabel('成功率', fontsize=14, fontweight='bold')
+        plt.title('成功率演化', fontsize=16, fontweight='bold', pad=20)
+        plt.colorbar(label='代数')
         plt.legend(fontsize=12)
         plt.grid(True, alpha=0.3, linestyle='--')
         plt.tight_layout()
@@ -238,7 +256,7 @@ class EvolutionPlotter:
             return
         
         fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-        fig.suptitle('Evolution Dashboard', fontsize=20, fontweight='bold', y=0.995)
+        fig.suptitle('演化过程综合仪表板', fontsize=20, fontweight='bold', y=0.995)
         
         # 子图1: 进化曲线
         ax1 = axes[0, 0]
@@ -246,9 +264,9 @@ class EvolutionPlotter:
         best_fitness = [g['best_fitness'] for g in generations]
         
         ax1.plot(gen_nums, best_fitness, 'o-', linewidth=2, markersize=8)
-        ax1.set_xlabel('Generation', fontweight='bold')
-        ax1.set_ylabel('Best Fitness', fontweight='bold')
-        ax1.set_title('Evolution Curve', fontweight='bold')
+        ax1.set_xlabel('代数', fontweight='bold')
+        ax1.set_ylabel('最优适应度', fontweight='bold')
+        ax1.set_title('演化曲线', fontweight='bold')
         ax1.grid(True, alpha=0.3)
         
         # 子图2: 成功率
@@ -264,9 +282,9 @@ class EvolutionPlotter:
                 success_rates_by_gen.append(0)
         
         ax2.bar(gen_nums, success_rates_by_gen, color='#457B9D', alpha=0.7)
-        ax2.set_xlabel('Generation', fontweight='bold')
-        ax2.set_ylabel('Avg Success Rate', fontweight='bold')
-        ax2.set_title('Success Rate per Generation', fontweight='bold')
+        ax2.set_xlabel('代数', fontweight='bold')
+        ax2.set_ylabel('平均成功率', fontweight='bold')
+        ax2.set_title('各代成功率', fontweight='bold')
         ax2.grid(True, alpha=0.3, axis='y')
         
         # 子图3: 捕获时间
@@ -282,9 +300,9 @@ class EvolutionPlotter:
                 capture_times_by_gen.append(100)
         
         ax3.plot(gen_nums, capture_times_by_gen, 's-', linewidth=2, markersize=6, color='#E63946')
-        ax3.set_xlabel('Generation', fontweight='bold')
-        ax3.set_ylabel('Avg Capture Time', fontweight='bold')
-        ax3.set_title('Capture Time per Generation', fontweight='bold')
+        ax3.set_xlabel('代数', fontweight='bold')
+        ax3.set_ylabel('平均捕获时间', fontweight='bold')
+        ax3.set_title('各代捕获时间', fontweight='bold')
         ax3.grid(True, alpha=0.3)
         
         # 子图4: 候选状态统计
@@ -302,13 +320,13 @@ class EvolutionPlotter:
         x = np.arange(len(gen_nums))
         width = 0.25
         
-        ax4.bar(x - width, success_counts, width, label='Success', color='#06D6A0')
-        ax4.bar(x, error_counts, width, label='Error', color='#EF476F')
-        ax4.bar(x + width, timeout_counts, width, label='Timeout', color='#FFD166')
+        ax4.bar(x - width, success_counts, width, label='成功', color='#06D6A0')
+        ax4.bar(x, error_counts, width, label='错误', color='#EF476F')
+        ax4.bar(x + width, timeout_counts, width, label='超时', color='#FFD166')
         
-        ax4.set_xlabel('Generation', fontweight='bold')
-        ax4.set_ylabel('Count', fontweight='bold')
-        ax4.set_title('Candidate Status Distribution', fontweight='bold')
+        ax4.set_xlabel('代数', fontweight='bold')
+        ax4.set_ylabel('数量', fontweight='bold')
+        ax4.set_title('候选状态分布', fontweight='bold')
         ax4.set_xticks(x)
         ax4.set_xticklabels([f'G{i}' for i in gen_nums])
         ax4.legend()

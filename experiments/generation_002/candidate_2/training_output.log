@@ -1,0 +1,260 @@
+D:\2025-9_data\work\LEMS\experiments\generation_002\candidate_2\MADDPG\main_train.py:5: DeprecationWarning: The environment `pettingzoo.mpe` has been moved to `mpe2` and will be removed in a future release.Please update your imports.
+  from pettingzoo.mpe import simple_adversary_v3, simple_spread_v3, simple_tag_v3
+Using device: cuda
+Using Env's name simple_tag_env
+agent_id: adversary_0
+agent_id: adversary_1
+agent_id: adversary_2
+agent_id: agent_0
+_dim_info: {'adversary_0': [12, 2], 'adversary_1': [12, 2], 'adversary_2': [12, 2], 'agent_0': [10, 2]}
+action_bound: {'adversary_0': [array([-1., -1.], dtype=float32), array([1., 1.], dtype=float32)], 'adversary_1': [array([-1., -1.], dtype=float32), array([1., 1.], dtype=float32)], 'adversary_2': [array([-1., -1.], dtype=float32), array([1., 1.], dtype=float32)], 'agent_0': [array([-1., -1.], dtype=float32), array([1., 1.], dtype=float32)]}
+episode 200, adversary_0: -192.370565; adversary_1: -229.934074; adversary_2: -252.840518; agent_0: -383.409402; sum reward: -1058.5545586363921
+  [围捕统计] 总成功率: 0.0% (0/200), 最近200回合: 0.0% (0次), 平均步数: 100.0
+
+[提前终止检测] Episode 200: 最近200回合成功率 = 0.0% (0/200)
+  未达标，重置计数器
+episode 400, adversary_0: -104.725342; adversary_1: -97.858090; adversary_2: -116.220586; agent_0: -343.997768; sum reward: -662.8017851279367
+  [围捕统计] 总成功率: 0.2% (1/400), 最近200回合: 0.5% (1次), 平均步数: 99.7
+
+[提前终止检测] Episode 400: 最近200回合成功率 = 0.5% (1/200)
+  未达标，重置计数器
+episode 600, adversary_0: -111.137462; adversary_1: -131.281605; adversary_2: -112.209249; agent_0: -190.712968; sum reward: -545.341284186558
+  [围捕统计] 总成功率: 2.2% (13/600), 最近200回合: 6.0% (12次), 平均步数: 97.6
+
+[提前终止检测] Episode 600: 最近200回合成功率 = 6.0% (12/200)
+  未达标，重置计数器
+episode 800, adversary_0: -68.570658; adversary_1: -87.838251; adversary_2: -79.381478; agent_0: -185.652290; sum reward: -421.44267697178987
+  [围捕统计] 总成功率: 2.2% (18/800), 最近200回合: 2.5% (5次), 平均步数: 98.7
+
+[提前终止检测] Episode 800: 最近200回合成功率 = 2.5% (5/200)
+  未达标，重置计数器
+episode 1000, adversary_0: -81.198075; adversary_1: -69.657806; adversary_2: -69.194792; agent_0: -58.029389; sum reward: -278.0800618812043
+  [围捕统计] 总成功率: 2.4% (24/1000), 最近200回合: 3.0% (6次), 平均步数: 98.1
+
+[提前终止检测] Episode 1000: 最近200回合成功率 = 3.0% (6/200)
+  未达标，重置计数器
+
+[学习率衰减] Episode 1000: Actor LR = 0.001900, Critic LR = 0.000190
+episode 1200, adversary_0: -22.651704; adversary_1: -23.070178; adversary_2: -16.802953; agent_0: -82.300552; sum reward: -144.82538709366452
+  [围捕统计] 总成功率: 2.2% (26/1200), 最近200回合: 1.0% (2次), 平均步数: 99.6
+
+[提前终止检测] Episode 1200: 最近200回合成功率 = 1.0% (2/200)
+  未达标，重置计数器
+episode 1400, adversary_0: 135.085949; adversary_1: 137.117570; adversary_2: 158.111994; agent_0: -459.231536; sum reward: -28.916023064768467
+  [围捕统计] 总成功率: 2.3% (32/1400), 最近200回合: 3.0% (6次), 平均步数: 98.9
+
+[提前终止检测] Episode 1400: 最近200回合成功率 = 3.0% (6/200)
+  未达标，重置计数器
+episode 1600, adversary_0: 133.138973; adversary_1: 158.287260; adversary_2: 142.149507; agent_0: -406.075641; sum reward: 27.500098656336377
+  [围捕统计] 总成功率: 2.2% (35/1600), 最近200回合: 1.5% (3次), 平均步数: 99.1
+
+[提前终止检测] Episode 1600: 最近200回合成功率 = 1.5% (3/200)
+  未达标，重置计数器
+episode 1800, adversary_0: 63.923911; adversary_1: 50.052833; adversary_2: 41.628519; agent_0: -344.945252; sum reward: -189.33998944329863
+  [围捕统计] 总成功率: 1.9% (35/1800), 最近200回合: 0.0% (0次), 平均步数: 100.0
+
+[提前终止检测] Episode 1800: 最近200回合成功率 = 0.0% (0/200)
+  未达标，重置计数器
+episode 2000, adversary_0: -134.833670; adversary_1: -127.746507; adversary_2: -107.211255; agent_0: -126.590741; sum reward: -496.3821726352535
+  [围捕统计] 总成功率: 1.8% (36/2000), 最近200回合: 0.5% (1次), 平均步数: 99.6
+
+[提前终止检测] Episode 2000: 最近200回合成功率 = 0.5% (1/200)
+  未达标，重置计数器
+
+[学习率衰减] Episode 2000: Actor LR = 0.001805, Critic LR = 0.000180
+episode 2200, adversary_0: 89.036856; adversary_1: 67.737305; adversary_2: 97.882096; agent_0: -129.048976; sum reward: 125.60728127019706
+  [围捕统计] 总成功率: 1.7% (37/2200), 最近200回合: 0.5% (1次), 平均步数: 99.7
+
+[提前终止检测] Episode 2200: 最近200回合成功率 = 0.5% (1/200)
+  未达标，重置计数器
+episode 2400, adversary_0: 217.149401; adversary_1: 210.725812; adversary_2: 192.926983; agent_0: -479.264611; sum reward: 141.53758450681454
+  [围捕统计] 总成功率: 1.5% (37/2400), 最近200回合: 0.0% (0次), 平均步数: 100.0
+
+[提前终止检测] Episode 2400: 最近200回合成功率 = 0.0% (0/200)
+  未达标，重置计数器
+episode 2600, adversary_0: 93.415732; adversary_1: 75.931194; adversary_2: 81.182905; agent_0: -21.425725; sum reward: 229.10410519150813
+  [围捕统计] 总成功率: 1.4% (37/2600), 最近200回合: 0.0% (0次), 平均步数: 100.0
+
+[提前终止检测] Episode 2600: 最近200回合成功率 = 0.0% (0/200)
+  未达标，重置计数器
+episode 2800, adversary_0: 10.837933; adversary_1: 18.929011; adversary_2: 1.247907; agent_0: -0.236551; sum reward: 30.778300245356718
+  [围捕统计] 总成功率: 1.3% (37/2800), 最近200回合: 0.0% (0次), 平均步数: 100.0
+
+[提前终止检测] Episode 2800: 最近200回合成功率 = 0.0% (0/200)
+  未达标，重置计数器
+episode 3000, adversary_0: 205.795085; adversary_1: 215.018139; adversary_2: 211.151053; agent_0: -22.458355; sum reward: 609.5059223145714
+  [围捕统计] 总成功率: 1.2% (37/3000), 最近200回合: 0.0% (0次), 平均步数: 100.0
+
+[提前终止检测] Episode 3000: 最近200回合成功率 = 0.0% (0/200)
+  未达标，重置计数器
+Rewards data saved to D:\2025-9_data\work\LEMS\experiments\generation_002\candidate_2\MADDPG\utils\..\plot\data\data_rewards_2026-04-15_12-36.csv
+  Total episodes: 3000
+  Successful captures: 37 (1.2%)
+  Average episode steps: 99.4
+奖励分量统计已保存到: D:\2025-9_data\work\LEMS\experiments\generation_002\candidate_2\MADDPG\utils\..\logs\reward_component_stats_2026-04-15_12-36-50.json
+摘要报告已保存到: D:\2025-9_data\work\LEMS\experiments\generation_002\candidate_2\MADDPG\utils\..\logs\reward_summary_report_2026-04-15_12-36-52.txt
+
+================================================================================
+================================================================================
+奖励分量统计报告
+================================================================================
+生成时间: 2026-04-15 12:36:57
+训练回合数: 3000
+
+【奖励分量统计】
+--------------------------------------------------------------------------------
+
+time_penalty:
+  均值:    -0.0010
+  标准差:     0.0000
+  最小值:    -0.0010
+  最大值:    -0.0010
+  总和:  -894.6150
+  样本数: 894615
+
+formation_angle:
+  均值:    -0.1107
+  标准差:     0.0670
+  最小值:    -0.2664
+  最大值:    -0.0002
+  总和: -98995.1841
+  样本数: 894615
+
+escape_reward:
+  均值:    -0.5709
+  标准差:     0.6993
+  最小值:    -2.1959
+  最大值:     0.1000
+  总和: -170237.7066
+  样本数: 298205
+
+velocity_diversity:
+  均值:     0.0886
+  标准差:     0.0390
+  最小值:     0.0001
+  最大值:     0.1500
+  总和: 79250.8029
+  样本数: 894615
+
+center_in_triangle:
+  均值:     1.1916
+  标准差:     1.4680
+  最小值:     0.0000
+  最大值:     3.0000
+  总和: 1066014.0000
+  样本数: 894615
+
+capture_bonus:
+  均值:     0.0084
+  标准差:     0.1624
+  最小值:     0.0000
+  最大值:    12.1719
+  总和:  7549.6367
+  样本数: 894615
+
+collision_penalty:
+  均值:     0.0000
+  标准差:     0.0000
+  最小值:     0.0000
+  最大值:     0.0000
+  总和:     0.0000
+  样本数: 894615
+
+distance_self:
+  均值:    -0.5925
+  标准差:     0.3765
+  最小值:    -4.9374
+  最大值:    -0.0487
+  总和: -530060.7915
+  样本数: 894615
+
+formation_radius:
+  均值:    -0.4093
+  标准差:     0.9301
+  最小值:   -25.3251
+  最大值:    -0.0000
+  总和: -366136.3367
+  样本数: 894615
+
+distance_team:
+  均值:    -0.1481
+  标准差:     0.0748
+  最小值:    -0.9173
+  最大值:    -0.0274
+  总和: -132515.1979
+  样本数: 894615
+
+capture_penalty:
+  均值:   -10.0000
+  标准差:     0.0000
+  最小值:   -10.0000
+  最大值:   -10.0000
+  总和: -459110.0000
+  样本数: 45911
+
+near_collision_penalty:
+  均值:    -0.0000
+  标准差:     0.0012
+  最小值:    -0.3791
+  最大值:     0.0000
+  总和:    -9.7300
+  样本数: 894615
+
+boundary_penalty:
+  均值:    -0.3815
+  标准差:     1.8856
+  最小值:   -20.0000
+  最大值:    -0.0000
+  总和: -113771.0345
+  样本数: 298205
+
+【协同行为指标】
+--------------------------------------------------------------------------------
+
+encirclement_angle_std:
+  均值:     1.2591
+  标准差:     0.7437
+  最小值:     0.0054
+  最大值:     2.9423
+  最终值:     0.2264
+
+min_agent_distance:
+  均值:     1.6422
+  标准差:     1.0494
+  最小值:     0.1762
+  最大值:    10.8084
+  最终值:     2.0397
+
+avg_distance_to_prey:
+  均值:     1.8607
+  标准差:     0.9607
+  最小值:     0.3527
+  最大值:    11.4657
+  最终值:     1.4323
+
+formation_quality:
+  均值:     0.2772
+  标准差:     0.1214
+  最小值:     0.0043
+  最大值:     0.8188
+  最终值:     0.5027
+
+================================================================================
+================================================================================
+agent <agents.maddpg.MADDPG_agent.MADDPG object at 0x0000018E30AB8F50>
+
+===========训练完成!===========
+训练设备: cuda
+训练用时: 0:58:16
+Current directory: D:\2025-9_data\work\LEMS\experiments\generation_002\candidate_2
+Saving training log to: D:\2025-9_data\work\LEMS\experiments\generation_002\candidate_2\MADDPG\utils\..\logs\training_log.json
+Log directory exists: D:\2025-9_data\work\LEMS\experiments\generation_002\candidate_2\MADDPG\utils\..\logs
+完成时间: 2026-04-15 12:36:57
+--- saving trained models ---
+Layer: net.0.weight, Shape: torch.Size([64, 12]), Values: tensor([-0.0126, -0.1110, -0.2542,  0.0366, -0.0518], device='cuda:0')
+Layer: net.0.bias, Shape: torch.Size([64]), Values: tensor([-0.5197, -0.3398,  0.3182, -0.5501, -0.0891], device='cuda:0')
+Layer: net.2.weight, Shape: torch.Size([64, 64]), Values: tensor([ 0.0161, -0.0427,  0.3962,  0.0659,  0.4029], device='cuda:0')
+Layer: net.2.bias, Shape: torch.Size([64]), Values: tensor([ 0.0463, -0.1359,  0.2360,  0.9561,  0.4080], device='cuda:0')
+Layer: net.4.weight, Shape: torch.Size([2, 64]), Values: tensor([ 0.5635,  1.0559,  0.2546, -0.6358, -1.1180], device='cuda:0')
+Layer: net.4.bias, Shape: torch.Size([2]), Values: tensor([0.0698, 0.3280], device='cuda:0')
+--- trained models saved ---
